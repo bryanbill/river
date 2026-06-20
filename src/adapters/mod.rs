@@ -1,0 +1,117 @@
+#![allow(dead_code)]
+
+pub mod mssql;
+pub mod mysql;
+pub mod postgres;
+pub mod sqlite;
+
+pub mod mongodb;
+
+use std::hash::{Hash, Hasher};
+use std::time::Duration;
+
+use async_trait::async_trait;
+
+use crate::connection::{ConnectionConfig, DatabaseKind};
+use crate::error::RiverError;
+
+#[derive(Debug, Clone)]
+pub enum Value {
+    Null,
+    String(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Null, Value::Null) => true,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
+
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Null => {}
+            Value::String(s) => s.hash(state),
+            Value::Int(i) => i.hash(state),
+            Value::Float(f) => f.to_bits().hash(state),
+            Value::Bool(b) => b.hash(state),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+    pub elapsed: Duration,
+    pub rows_affected: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TableInfo {
+    pub name: String,
+    pub schema: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ColumnInfo {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    pub is_primary_key: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TableSchema {
+    pub name: String,
+    pub columns: Vec<ColumnInfo>,
+}
+
+/// Every database adapter must implement this trait.
+///
+/// Implementors handle connection lifecycle and query execution
+/// for a specific database backend.
+#[async_trait]
+pub trait DatabaseAdapter: Send + Sync {
+    /// Open a connection using the given configuration.
+    async fn connect(config: &ConnectionConfig) -> Result<Self, RiverError>
+    where
+        Self: Sized;
+
+    /// Execute a raw SQL query and return the result set.
+    async fn execute(&self, query: &str) -> Result<QueryResult, RiverError>;
+
+    /// List all tables in the current database.
+    async fn list_tables(&self) -> Result<Vec<TableInfo>, RiverError>;
+
+    /// Describe the columns of a given table.
+    async fn describe_table(&self, table: &str) -> Result<TableSchema, RiverError>;
+
+    /// Return which database dialect this adapter speaks.
+    fn dialect(&self) -> DatabaseKind;
+}
+
+pub async fn create_adapter(
+    config: &ConnectionConfig,
+) -> Result<Box<dyn DatabaseAdapter>, RiverError> {
+    match config.kind {
+        DatabaseKind::Postgres => Ok(Box::new(postgres::PostgresAdapter::connect(config).await?)),
+        DatabaseKind::MySQL => Ok(Box::new(mysql::MySQLAdapter::connect(config).await?)),
+        DatabaseKind::MSSQL => Ok(Box::new(mssql::MssqlAdapter::connect(config).await?)),
+        DatabaseKind::SQLite => Ok(Box::new(sqlite::SQLiteAdapter::connect(config).await?)),
+        DatabaseKind::MongoDB => Ok(Box::new(mongodb::MongoAdapter::connect(config).await?)),
+    }
+}
