@@ -20,7 +20,7 @@ tokio-postgres = "0.7"
 sqlx = { version = "0.9", features = ["mysql", "mysql-rsa", "postgres", "sqlite", "runtime-tokio", "rust_decimal", "time"] }
 rust_decimal = "1"
 mongodb = "3"
-tiberius = { version = "0.12", features = ["tds73", "time"] }
+tiberius = { version = "0.12", default-features = false, features = ["tds73", "time", "rustls", "tokio-rustls"] }
 time = { version = "0.3", features = ["formatting"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"
