@@ -260,10 +260,19 @@ async fn execute_node(
             elapsed: std::time::Duration::default(),
             rows_affected: rows.len() as u64,
         }),
-        PlanNode::SemiJoinFetch { .. } => {
-            Err(RiverError::Unsupported(
-                "SemiJoinFetch execution not yet implemented".into(),
-            ))
+        PlanNode::SemiJoinFetch {
+            build,
+            probe_source,
+            probe_database,
+            build_key,
+            probe_key,
+            join_kind,
+            condition,
+        } => {
+            execute_semi_join_fetch(
+                build, probe_source, probe_database, build_key, probe_key,
+                *join_kind, condition, adapters,
+            ).await
         }
         PlanNode::Empty => Ok(empty_result()),
         PlanNode::Scan { source, .. } => {
@@ -278,6 +287,123 @@ async fn execute_node(
             }
         }
     }
+}
+
+async fn execute_semi_join_fetch(
+    build: &PlanNode,
+    probe_source: &Source,
+    probe_database: &(String, DatabaseKind),
+    build_key: &Expression,
+    probe_key: &Expression,
+    join_kind: JoinKind,
+    condition: &Expression,
+    adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
+) -> Result<QueryResult, RiverError> {
+    use crate::engine::planner::CROSS_DB_BATCH_SIZE;
+
+    // 1. Execute the build side
+    let build_result = Box::pin(execute_node(build, adapters)).await?;
+
+    if build_result.rows.is_empty() {
+        return Ok(empty_result());
+    }
+
+    // 2. Extract distinct join keys from build result
+    let build_key_col = match build_key {
+        Expression::Ident(name) => name.clone(),
+        Expression::QualifiedIdent { field, .. } => field.clone(),
+        _ => {
+            return Err(RiverError::Unsupported(
+                "SemiJoinFetch requires a simple column reference as build key".into(),
+            ));
+        }
+    };
+    let probe_key_col = match probe_key {
+        Expression::Ident(name) => name.clone(),
+        Expression::QualifiedIdent { field, .. } => field.clone(),
+        _ => {
+            return Err(RiverError::Unsupported(
+                "SemiJoinFetch requires a simple column reference as probe key".into(),
+            ));
+        }
+    };
+
+    let build_key_idx = build_result
+        .columns
+        .iter()
+        .position(|c| c == &build_key_col)
+        .ok_or_else(|| {
+            RiverError::Unsupported(format!(
+                "Build key column '{}' not found in build result columns: {:?}",
+                build_key_col, build_result.columns
+            ))
+        })?;
+
+    let mut distinct_keys: Vec<Value> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for row in &build_result.rows {
+        let key = row.get(build_key_idx).cloned().unwrap_or(Value::Null);
+        if key != Value::Null && seen.insert(key.clone()) {
+            distinct_keys.push(key);
+        }
+    }
+
+    if distinct_keys.is_empty() {
+        return Ok(empty_result());
+    }
+
+    // 3. Batch-fetch from probe side
+    let (db_name, db_kind) = probe_database;
+    let adapter = adapters.get(db_name).ok_or_else(|| {
+        RiverError::Unsupported(format!("no adapter connected for '{}'", db_name))
+    })?;
+
+    let table_name = match &probe_source.kind {
+        SourceKind::Table(t) => t.clone(),
+        _ => probe_source.name.clone(),
+    };
+
+    let mut probe_rows: Vec<Vec<Value>> = Vec::new();
+    let mut probe_columns: Vec<String> = Vec::new();
+
+    for chunk in distinct_keys.chunks(CROSS_DB_BATCH_SIZE) {
+        let native_query = match db_kind {
+            DatabaseKind::MongoDB => {
+                let pipeline = crate::engine::translator::build_probe_query_mongo(
+                    &table_name, &probe_key_col, chunk, "",
+                );
+                serde_json::to_string(&pipeline).unwrap_or_default()
+            }
+            _ => {
+                let dialect: Box<dyn crate::engine::translator::SqlDialect> = match db_kind {
+                    DatabaseKind::Postgres => Box::new(crate::engine::translator::PostgresDialect),
+                    DatabaseKind::MySQL => Box::new(crate::engine::translator::MySQLDialect),
+                    DatabaseKind::MSSQL => Box::new(crate::engine::translator::MSSQLDialect),
+                    DatabaseKind::SQLite => Box::new(crate::engine::translator::SQLiteDialect),
+                    DatabaseKind::MongoDB => unreachable!(),
+                };
+                crate::engine::translator::build_probe_query_sql(
+                    &table_name, &probe_key_col, chunk, dialect.as_ref(),
+                )
+            }
+        };
+
+        let batch_result = adapter.execute(&native_query).await?;
+        if probe_columns.is_empty() {
+            probe_columns = batch_result.columns.clone();
+        }
+        probe_rows.extend(batch_result.rows);
+    }
+
+    let probe_result = QueryResult {
+        columns: probe_columns,
+        rows: probe_rows,
+        elapsed: std::time::Duration::default(),
+        rows_affected: 0,
+    };
+
+    // 4. Hash join the build and probe results
+    hash_join(build_result, probe_result, condition, join_kind)
 }
 
 fn empty_result() -> QueryResult {
