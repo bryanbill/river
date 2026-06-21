@@ -1038,3 +1038,95 @@ pub fn build_probe_query_mongo(
         "pipeline": [{ "$match": match_stage }],
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::Value;
+
+    #[test]
+    fn in_list_postgres_ints() {
+        let values = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
+        let sql = translate_in_list("user_id", &values, &PostgresDialect);
+        assert_eq!(sql, r#""user_id" IN (1, 2, 3)"#);
+    }
+
+    #[test]
+    fn in_list_mysql_strings() {
+        let values = vec![
+            Value::String("alice".into()),
+            Value::String("bob".into()),
+        ];
+        let sql = translate_in_list("name", &values, &MySQLDialect);
+        assert_eq!(sql, "`name` IN ('alice', 'bob')");
+    }
+
+    #[test]
+    fn in_list_mssql_mixed() {
+        let values = vec![Value::Int(42), Value::String("hello".into()), Value::Bool(true)];
+        let sql = translate_in_list("col", &values, &MSSQLDialect);
+        assert_eq!(sql, "[col] IN (42, 'hello', TRUE)");
+    }
+
+    #[test]
+    fn in_list_empty_returns_false() {
+        let values: Vec<Value> = vec![];
+        let sql = translate_in_list("id", &values, &PostgresDialect);
+        assert_eq!(sql, "1=0");
+    }
+
+    #[test]
+    fn in_list_all_null_returns_false() {
+        let values = vec![Value::Null, Value::Null];
+        let sql = translate_in_list("id", &values, &PostgresDialect);
+        assert_eq!(sql, "1=0");
+    }
+
+    #[test]
+    fn in_list_skips_nulls() {
+        let values = vec![Value::Null, Value::Int(1), Value::Null, Value::Int(2)];
+        let sql = translate_in_list("id", &values, &PostgresDialect);
+        assert_eq!(sql, r#""id" IN (1, 2)"#);
+    }
+
+    #[test]
+    fn in_list_escapes_quotes() {
+        let values = vec![Value::String("it's".into())];
+        let sql = translate_in_list("name", &values, &PostgresDialect);
+        assert_eq!(sql, r#""name" IN ('it''s')"#);
+    }
+
+    #[test]
+    fn build_probe_sql_postgres() {
+        let values = vec![Value::Int(10), Value::Int(20)];
+        let sql = build_probe_query_sql("orders", "user_id", &values, &PostgresDialect);
+        assert_eq!(sql, r#"SELECT * FROM "orders" WHERE "user_id" IN (10, 20)"#);
+    }
+
+    #[test]
+    fn build_probe_sql_mysql() {
+        let values = vec![Value::Int(5)];
+        let sql = build_probe_query_sql("users", "id", &values, &MySQLDialect);
+        assert_eq!(sql, "SELECT * FROM `users` WHERE `id` IN (5)");
+    }
+
+    #[test]
+    fn in_list_mongo_ints() {
+        let values = vec![Value::Int(1), Value::Int(2)];
+        let result = translate_in_list_mongo("user_id", &values);
+        let expected = json!({"user_id": {"$in": [1, 2]}});
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn build_probe_mongo() {
+        let values = vec![Value::Int(10), Value::Int(20)];
+        let result = build_probe_query_mongo("orders", "user_id", &values, "mydb");
+        let expected = json!({
+            "database": "mydb",
+            "collection": "orders",
+            "pipeline": [{"$match": {"user_id": {"$in": [10, 20]}}}],
+        });
+        assert_eq!(result, expected);
+    }
+}
