@@ -247,6 +247,23 @@ async fn same_table_different_dbs() {
     }
 }
 
+// ── CTE (Common Table Expressions) across databases ───────────────────────────
+
+#[tokio::test]
+async fn cross_db_cte_join() {
+    let ctx = TestContext::new().await;
+    let result = execute_river(
+        &ctx,
+        r#"with recent_orders as ( find [user_id, total] from orders@pg where total > 500 limit 100 ) find [u.name, ro.total] from users@mysql as u join recent_orders as ro on u.id = ro.user_id"#,
+    )
+    .await
+    .expect("cross-db CTE join failed");
+
+    assert_row_count_gte(&result, 1);
+    assert_no_nulls(&result, "name");
+    assert_no_nulls(&result, "total");
+}
+
 // ── Large cross-DB join (stress test) ────────────────────────────────────────
 
 #[tokio::test]

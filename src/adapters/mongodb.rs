@@ -29,7 +29,25 @@ fn json_to_value(jv: &JsonValue) -> Value {
         }
         JsonValue::String(s) => Value::String(s.clone()),
         JsonValue::Array(arr) => Value::String(serde_json::to_string(arr).unwrap_or_default()),
-        JsonValue::Object(obj) => Value::String(serde_json::to_string(obj).unwrap_or_default()),
+        JsonValue::Object(obj) => {
+            if let Some(date) = obj.get("$date").and_then(|v| v.as_str()) {
+                return Value::String(date.to_string());
+            }
+            if let Some(date) = obj.get("$date").and_then(|v| v.as_object()) {
+                if let Some(ts) = date.get("$numberLong").and_then(|v| v.as_str()) {
+                    if let Ok(ms) = ts.parse::<i64>() {
+                        if let Some(dt) = time::OffsetDateTime::from_unix_timestamp_nanos(
+                            (ms as i128).saturating_mul(1_000_000),
+                        )
+                        .ok()
+                        {
+                            return Value::String(super::format_offset_dt(dt));
+                        }
+                    }
+                }
+            }
+            Value::String(serde_json::to_string(obj).unwrap_or_default())
+        }
     }
 }
 

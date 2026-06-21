@@ -115,3 +115,23 @@ pub async fn create_adapter(
         DatabaseKind::MongoDB => Ok(Box::new(mongodb::MongoAdapter::connect(config).await?)),
     }
 }
+
+pub(crate) fn format_primitive_dt(dt: time::PrimitiveDateTime) -> String {
+    let format = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+    dt.format(format).unwrap_or_else(|_| dt.to_string())
+}
+
+pub(crate) fn format_offset_dt(dt: time::OffsetDateTime) -> String {
+    let format = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory]:[offset_minute]");
+    dt.format(format).unwrap_or_else(|_| dt.to_string())
+}
+
+pub(crate) fn format_date(d: time::Date) -> String {
+    let format = time::macros::format_description!("[year]-[month]-[day]");
+    d.format(format).unwrap_or_else(|_| d.to_string())
+}
+
+pub(crate) fn format_time(t: time::Time) -> String {
+    let format = time::macros::format_description!("[hour]:[minute]:[second]");
+    t.format(format).unwrap_or_else(|_| t.to_string())
+}

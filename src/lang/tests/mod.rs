@@ -1,0 +1,610 @@
+use chumsky::prelude::*;
+
+use super::ast::*;
+use super::lexer::{self, Token};
+
+type Spanned = (Token, std::ops::Range<usize>);
+type PErr = chumsky::error::Simple<Spanned>;
+
+fn lex_tokens(input: &str) -> Vec<Spanned> {
+    let tokens = lexer::lex(input);
+    tokens.into_iter().map(|s| (s.token, s.span)).collect()
+}
+
+fn parse_one(input: &str) -> Result<Vec<Statement>, Vec<PErr>> {
+    let tokens = lex_tokens(input);
+    super::parser::parser().parse(tokens)
+}
+
+// ── Basic queries ────────────────────────────────────────────────────────────
+
+#[test]
+fn simple_find() {
+    assert!(parse_one("find users where age > 21 limit 10").is_ok());
+}
+
+#[test]
+fn find_with_projection() {
+    assert!(parse_one("find [name, email] from users where status = \"active\"").is_ok());
+}
+
+#[test]
+fn find_star() {
+    assert!(parse_one("find * from users where created_at > now()").is_ok());
+}
+
+#[test]
+fn distinct() {
+    assert!(parse_one("find distinct [status] from users").is_ok());
+}
+
+#[test]
+fn order_by() {
+    assert!(parse_one("find [name, age] from users order by age desc").is_ok());
+}
+
+#[test]
+fn order_by_multiple() {
+    assert!(parse_one(
+        "find [name, department, salary] from employees order by department asc, salary desc"
+    )
+    .is_ok());
+}
+
+#[test]
+fn order_by_nulls() {
+    assert!(parse_one(
+        "find [name, deleted_at] from users order by deleted_at asc nulls first"
+    )
+    .is_ok());
+}
+
+#[test]
+fn limit_offset() {
+    assert!(parse_one(
+        "find [name] from users order by created_at desc limit 10 offset 20"
+    )
+    .is_ok());
+}
+
+// ── Joins ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn join() {
+    assert!(parse_one(
+        "find [u.name, o.total] from users as u join orders as o on u.id = o.user_id"
+    )
+    .is_ok());
+}
+
+#[test]
+fn left_join() {
+    assert!(parse_one(
+        "find [u.name, o.total] from users as u left join orders as o on u.id = o.user_id"
+    )
+    .is_ok());
+}
+
+#[test]
+fn right_join() {
+    assert!(parse_one(
+        "find [u.name, o.total] from users as u right join orders as o on u.id = o.user_id"
+    )
+    .is_ok());
+}
+
+#[test]
+fn full_join() {
+    assert!(parse_one(
+        "find [u.name, o.total] from users as u full join orders as o on u.id = o.user_id"
+    )
+    .is_ok());
+}
+
+#[test]
+fn cross_join() {
+    assert!(parse_one("find [u.name, o.total] from users as u cross join orders as o").is_ok());
+}
+
+#[test]
+fn multiple_joins() {
+    assert!(parse_one(
+        "find [u.name, o.total, p.title] from users as u join orders as o on u.id = o.user_id join products as p on o.product_id = p.id"
+    ).is_ok());
+}
+
+// ── CTEs ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn cte() {
+    assert!(parse_one(
+        "with active_users as ( find * from users where status = \"active\" ) find [name, email] from active_users"
+    ).is_ok());
+}
+
+#[test]
+fn multiple_ctes() {
+    assert!(parse_one(
+        "with paid_orders as ( find * from orders where status = \"paid\" ), user_totals as ( find [user_id, sum(total) as revenue] from paid_orders group by user_id ) find [u.name, ut.revenue] from users as u join user_totals as ut on u.id = ut.user_id where ut.revenue > 1000 order by ut.revenue desc"
+    ).is_ok());
+}
+
+#[test]
+fn multiple_ctes_multiline() {
+    assert!(parse_one(
+        r#"with
+  paid_orders as (
+    find * from orders where status = "paid"
+  ),
+  user_totals as (
+    find [user_id, sum(total) as revenue]
+    from paid_orders
+    group by user_id
+  )
+find [u.name, ut.revenue]
+from users"#
+    ).is_ok());
+}
+
+#[test]
+fn recursive_cte() {
+    let result = parse_one(
+        "with recursive org_tree as ( find * from employees where manager_id is null union all find [e.*] from employees as e join org_tree as t on e.manager_id = t.id ) find * from org_tree"
+    ).unwrap();
+    match &result[0] {
+        Statement::With(w) => {
+            assert!(w.recursive);
+            assert_eq!(w.ctes.len(), 1);
+            assert_eq!(w.ctes[0].name, "org_tree");
+            // Verify the chain (union all) is preserved
+            assert_eq!(w.ctes[0].chain.len(), 1, "Expected 1 set op in chain, got {:?}", w.ctes[0].chain.len());
+            assert_eq!(w.ctes[0].chain[0].0, SetOpKind::UnionAll);
+        }
+        _ => panic!("Expected With statement"),
+    }
+}
+
+#[test]
+fn cte_with_column_aliases() {
+    let result = parse_one(
+        "with top_earners (id, name, pay) as ( find [id, name, salary] from users limit 10 ) find [name, pay] from top_earners"
+    ).unwrap();
+    match &result[0] {
+        Statement::With(w) => {
+            let cols = w.ctes[0].columns.as_ref().unwrap();
+            assert_eq!(cols, &["id", "name", "pay"]);
+        }
+        _ => panic!("Expected With statement"),
+    }
+}
+
+#[test]
+fn cte_with_order_by_and_limit() {
+    let result = parse_one(
+        r#"with recent as (find [id, name] from users order by id desc limit 50) find [name] from recent"#
+    ).unwrap();
+    match &result[0] {
+        Statement::With(w) => {
+            let q = &*w.ctes[0].query;
+            assert_eq!(q.limit, Some(50));
+            assert_eq!(q.order_by.len(), 1);
+        }
+        _ => panic!("Expected With statement"),
+    }
+}
+
+#[test]
+fn cte_with_distinct() {
+    assert!(parse_one(
+        r#"with depts as (find distinct [department] from users) find [department] from depts"#
+    ).is_ok());
+}
+
+#[test]
+fn cte_with_having() {
+    assert!(parse_one(
+        r#"with big_depts as (find [department, count(*) as n] from users group by department having count(*) > 10) find [department] from big_depts"#
+    ).is_ok());
+}
+
+#[test]
+fn cte_with_window_function() {
+    assert!(parse_one(
+        r#"with ranked as (find [id, name, row_number() over (order by salary desc) as rn] from users) find [name] from ranked where rn <= 10"#
+    ).is_ok());
+}
+
+#[test]
+fn cte_referencing_cte() {
+    let result = parse_one(
+        r#"with step1 as (find [id, name] from users where status = "active"), step2 as (find [id] from step1 limit 20) find [name] from step2 join users on step2.id = users.id"#
+    ).unwrap();
+    match &result[0] {
+        Statement::With(w) => {
+            assert_eq!(w.ctes.len(), 2);
+            assert_eq!(w.ctes[0].name, "step1");
+            assert_eq!(w.ctes[1].name, "step2");
+            // step2 should reference step1 via CteRef
+            let step2_q = &*w.ctes[1].query;
+            assert!(matches!(&step2_q.sources[0].kind, SourceKind::CteRef(name) if name == "step1"));
+        }
+        _ => panic!("Expected With statement"),
+    }
+}
+
+#[test]
+fn cte_union_intersect_except() {
+    // UNION
+    let r = parse_one(
+        r#"with combined as (find [id] from users union find [id] from orders) find * from combined"#
+    ).unwrap();
+    match &r[0] {
+        Statement::With(w) => {
+            assert_eq!(w.ctes[0].chain.len(), 1);
+            assert_eq!(w.ctes[0].chain[0].0, SetOpKind::Union);
+        }
+        _ => panic!("Expected With statement"),
+    }
+
+    // INTERSECT
+    let r = parse_one(
+        r#"with common as (find [id] from users intersect find [id] from orders) find * from common"#
+    ).unwrap();
+    match &r[0] {
+        Statement::With(w) => {
+            assert_eq!(w.ctes[0].chain.len(), 1);
+            assert_eq!(w.ctes[0].chain[0].0, SetOpKind::Intersect);
+        }
+        _ => panic!("Expected With statement"),
+    }
+
+    // EXCEPT
+    let r = parse_one(
+        r#"with only_users as (find [id] from users except find [id] from orders) find * from only_users"#
+    ).unwrap();
+    match &r[0] {
+        Statement::With(w) => {
+            assert_eq!(w.ctes[0].chain.len(), 1);
+            assert_eq!(w.ctes[0].chain[0].0, SetOpKind::Except);
+        }
+        _ => panic!("Expected With statement"),
+    }
+}
+
+#[test]
+fn cte_followed_by_semicolon() {
+    assert!(parse_one(
+        r#"with active as (find * from users where status = "active") find * from active;"#
+    ).is_ok());
+}
+
+#[test]
+fn cte_ref_resolved_to_cteref() {
+    // Verify that CTE references in the body are resolved from Table to CteRef
+    let result = parse_one(
+        "with recent_orders as ( find [user_id, total] from orders@pg limit 1000) find [u.name, ro.total] from users@mysql as u join recent_orders as ro"
+    ).unwrap();
+    match &result[0] {
+        Statement::With(w) => match w.body.as_ref() {
+            Statement::Query(q) => {
+                // Check that recent_orders in the join is now a CteRef
+                let join_source = &q.joins[0].source;
+                assert!(matches!(join_source.kind, SourceKind::CteRef(ref name) if name == "recent_orders"));
+            }
+            _ => panic!("expected Query body"),
+        },
+        _ => panic!("expected With statement"),
+    }
+}
+
+// ── Aggregation & grouping ───────────────────────────────────────────────────
+
+#[test]
+fn group_by() {
+    assert!(parse_one(
+        "find [department, count(*) as total] from employees group by department"
+    )
+    .is_ok());
+}
+
+#[test]
+fn having() {
+    assert!(parse_one(
+        "find [user_id, count(*) as order_count] from orders group by user_id having count(*) > 5"
+    )
+    .is_ok());
+}
+
+#[test]
+fn aggregates() {
+    assert!(parse_one(
+        "find [status, count(*) as cnt, sum(total) as revenue, avg(total) as avg_order, min(created_at) as first_order, max(created_at) as last_order] from orders group by status"
+    ).is_ok());
+}
+
+#[test]
+fn count_distinct() {
+    assert!(parse_one(
+        "find [status, count_distinct(user_id) as unique_users] from orders group by status"
+    ).is_ok());
+}
+
+// ── Window functions ─────────────────────────────────────────────────────────
+
+#[test]
+fn window_functions() {
+    assert!(parse_one(
+        "find [name, department, salary, row_number() over (partition by department order by salary desc) as rank] from employees"
+    ).is_ok());
+}
+
+#[test]
+fn rank_dense_rank() {
+    assert!(parse_one(
+        "find [name, score, rank() over (order by score desc) as position, dense_rank() over (order by score desc) as dense_position] from players"
+    ).is_ok());
+}
+
+#[test]
+fn named_window() {
+    assert!(parse_one(
+        "find [name, department, salary, avg(salary) over w as dept_avg, max(salary) over w as dept_max] from employees window w as (partition by department)"
+    ).is_ok());
+}
+
+// ── CASE expressions ─────────────────────────────────────────────────────────
+
+#[test]
+fn case_simple() {
+    assert!(parse_one(
+        "find [name, case status when \"active\" then \"Active User\" when \"suspended\" then \"Suspended\" else \"Unknown\" end as status_label] from users"
+    ).is_ok());
+}
+
+#[test]
+fn case_searched() {
+    assert!(parse_one(
+        "find [name, salary, case when salary < 50000 then \"Low\" when salary >= 50000 and salary < 100000 then \"Medium\" when salary >= 100000 then \"High\" else \"Unknown\" end as salary_band] from employees"
+    ).is_ok());
+}
+
+// ── Set operations ───────────────────────────────────────────────────────────
+
+#[test]
+fn union() {
+    assert!(parse_one(
+        "find [name, email] from customers union find [name, email] from suppliers"
+    )
+    .is_ok());
+}
+
+#[test]
+fn union_all() {
+    assert!(parse_one(
+        "find [name, email] from customers union all find [name, email] from suppliers"
+    )
+    .is_ok());
+}
+
+#[test]
+fn intersect() {
+    assert!(parse_one(
+        "find [user_id] from orders where year = 2024 intersect find [user_id] from orders where year = 2025"
+    ).is_ok());
+}
+
+#[test]
+fn except() {
+    assert!(parse_one(
+        "find [user_id] from users except find [user_id] from orders where created_at > now() - 30d"
+    ).is_ok());
+}
+
+// ── Subqueries ───────────────────────────────────────────────────────────────
+
+#[test]
+fn exists() {
+    assert!(parse_one(
+        "find [name] from users as u where exists ( find [1] from orders as o where o.user_id = u.id )"
+    ).is_ok());
+}
+
+#[test]
+fn not_exists() {
+    assert!(parse_one(
+        "find [name] from users as u where not exists ( find [1] from orders as o where o.user_id = u.id )"
+    ).is_ok());
+}
+
+#[test]
+fn subquery_in_where() {
+    assert!(parse_one(
+        "find [name, salary] from employees where salary > ( find [avg(salary)] from employees )"
+    ).is_ok());
+}
+
+#[test]
+fn subquery_in_select() {
+    assert!(parse_one(
+        "find [name, ( find [count(*)] from orders where orders.user_id = users.id ) as order_count] from users"
+    ).is_ok());
+}
+
+#[test]
+fn in_subquery() {
+    assert!(parse_one(
+        "find [name, department] from employees where department in ( find distinct [department] from departments where budget > 100000 )"
+    ).is_ok());
+}
+
+// ── NULL handling ────────────────────────────────────────────────────────────
+
+#[test]
+fn is_null() {
+    assert!(parse_one("find [name] from users where deleted_at is null").is_ok());
+}
+
+#[test]
+fn is_not_null() {
+    assert!(parse_one("find [name] from users where email_verified_at is not null").is_ok());
+}
+
+#[test]
+fn coalesce() {
+    assert!(parse_one(
+        "find [name, coalesce(nickname, name) as display_name] from users"
+    )
+    .is_ok());
+}
+
+// ── Operators ────────────────────────────────────────────────────────────────
+
+#[test]
+fn like() {
+    assert!(parse_one("find [name] from users where name like \"%smith%\"").is_ok());
+}
+
+#[test]
+fn ilike() {
+    assert!(parse_one("find [name] from users where name ilike \"%smith%\"").is_ok());
+}
+
+#[test]
+fn in_list() {
+    assert!(parse_one("find [name] from users where status in (\"active\", \"pending\")").is_ok());
+}
+
+#[test]
+fn range_comparison() {
+    assert!(parse_one(
+        "find [name] from users where created_at between \"2024-01-01\" and \"2024-12-31\""
+    ).is_ok());
+}
+
+#[test]
+fn interval() {
+    assert!(parse_one("find [name] from users where created_at > now() - 30d").is_ok());
+}
+
+// ── Casting ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn cast_fn() {
+    assert!(parse_one("find [name, cast(age as string) as age_str] from users").is_ok());
+}
+
+#[test]
+fn cast_op() {
+    assert!(parse_one("find [name, created_at::string as date_str] from users").is_ok());
+}
+
+// ── Data modification ────────────────────────────────────────────────────────
+
+#[test]
+fn insert() {
+    assert!(parse_one("create user { name: \"Alice\", email: \"alice@mail.com\", age: 30 }").is_ok());
+}
+
+#[test]
+fn insert_multiple() {
+    assert!(parse_one(
+        "create users [ { name: \"Alice\", email: \"alice@mail.com\" }, { name: \"Bob\", email: \"bob@mail.com\" } ]"
+    ).is_ok());
+}
+
+#[test]
+fn insert_from_query() {
+    assert!(parse_one(
+        "create active_users_backup ( find * from users where status = \"active\" )"
+    ).is_ok());
+}
+
+#[test]
+fn update() {
+    assert!(parse_one(
+        "update users set status = \"inactive\", updated_at = now() where last_login < now() - 90d"
+    )
+    .is_ok());
+}
+
+#[test]
+fn delete() {
+    assert!(parse_one("remove users where status = \"banned\"").is_ok());
+}
+
+// ── Meta commands ────────────────────────────────────────────────────────────
+
+#[test]
+fn describe() {
+    assert!(parse_one("describe users").is_ok());
+}
+
+#[test]
+fn describe_with_connection() {
+    assert!(parse_one("describe users@prod_pg").is_ok());
+}
+
+#[test]
+fn show_tables() {
+    assert!(parse_one("show tables").is_ok());
+}
+
+#[test]
+fn show_tables_with_connection() {
+    assert!(parse_one("show tables @prod_pg").is_ok());
+}
+
+#[test]
+fn explain() {
+    assert!(parse_one("explain find [name] from users").is_ok());
+}
+
+#[test]
+fn param_assign() {
+    assert!(parse_one(":start_date = \"2024-01-01\"").is_ok());
+}
+
+// ── Cross-database ───────────────────────────────────────────────────────────
+
+#[test]
+fn cross_database() {
+    assert!(parse_one(
+        "find [name] from users@prod_pg join logs@analytics_mongo on users.id = logs.user_id where logs.action = \"login\""
+    ).is_ok());
+}
+
+// ── Multiple statements ──────────────────────────────────────────────────────
+
+#[test]
+fn multiple_statements() {
+    let result = parse_one(":start = \"2024\" ; find [name] from users ; :end = \"2025\"");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    let stmts = result.unwrap();
+    assert_eq!(stmts.len(), 3);
+}
+
+#[test]
+fn multiple_ctes_compact() {
+    let result = parse_one(
+        "with  paid_orders as (    find * from orders where status = \"paid\"  ),  user_totals as (    find [user_id, sum(total) as revenue]    from paid_orders    group by user_id  )find [u.name, ut.revenue]from users "
+    );
+    match &result {
+        Ok(stmts) => {
+            assert_eq!(stmts.len(), 1, "Expected 1 statement, got {}", stmts.len());
+            match &stmts[0] {
+                Statement::With(w) => {
+                    assert_eq!(w.ctes.len(), 2, "Expected 2 CTEs, got {}", w.ctes.len());
+                    assert_eq!(w.ctes[0].name, "paid_orders");
+                    assert_eq!(w.ctes[1].name, "user_totals");
+                }
+                other => panic!("Expected With statement, got {:?}", std::mem::discriminant(other)),
+            }
+        }
+        Err(e) => {
+            for err in e {
+                eprintln!("Parse error: {:?}", err);
+            }
+            panic!("Parse failed");
+        }
+    }
+}

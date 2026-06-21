@@ -26,6 +26,7 @@ pub enum PlanNode {
         condition: Expression,
         strategy: JoinStrategy,
         join_kind: JoinKind,
+        limit: Option<u64>,
     },
     Project {
         input: Box<PlanNode>,
@@ -35,6 +36,7 @@ pub enum PlanNode {
         input: Box<PlanNode>,
         group_by: Vec<Expression>,
         aggs: Vec<(Expression, Option<String>)>,
+        having: Option<Expression>,
     },
     Limit {
         input: Box<PlanNode>,
@@ -69,6 +71,17 @@ pub enum PlanNode {
     InlineData {
         columns: Vec<String>,
         rows: Vec<Vec<crate::adapters::Value>>,
+    },
+    ListTables {
+        database: (String, DatabaseKind),
+    },
+    DescribeTable {
+        database: (String, DatabaseKind),
+        table: String,
+    },
+    Dml {
+        database: (String, DatabaseKind),
+        sql: String,
     },
     Empty,
 }
@@ -153,23 +166,32 @@ fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
             if l.0 == r.0 { Some(l) } else { None }
         }
         PlanNode::SemiJoinFetch { .. } => None,
+        PlanNode::ListTables { database } => Some(database.clone()),
+        PlanNode::DescribeTable { database, .. } => Some(database.clone()),
+        PlanNode::Dml { database, .. } => Some(database.clone()),
         PlanNode::InlineData { .. } | PlanNode::Empty => None,
     }
 }
 
 pub fn plan_query(query: &Query, source_db: &[(String, DatabaseKind)]) -> QueryPlan {
+    let mut needs_default_cross_join_limit = false;
+
     let mut current: PlanNode = if query.sources.is_empty() {
         PlanNode::Empty
     } else {
         let mut root = plan_source(&query.sources[0], source_db);
 
         for source in &query.sources[1..] {
+            if query.limit.is_none() {
+                needs_default_cross_join_limit = true;
+            }
             root = PlanNode::Join {
                 left: Box::new(root),
                 right: Box::new(plan_source(source, source_db)),
                 condition: Expression::Boolean(true),
                 strategy: JoinStrategy::Auto,
                 join_kind: JoinKind::Cross,
+                limit: query.limit,
             };
         }
 
@@ -204,6 +226,7 @@ pub fn plan_query(query: &Query, source_db: &[(String, DatabaseKind)]) -> QueryP
                                 condition,
                                 strategy: JoinStrategy::Hash,
                                 join_kind: join.kind,
+                                limit: None,
                             };
                             continue;
                         }
@@ -226,13 +249,14 @@ pub fn plan_query(query: &Query, source_db: &[(String, DatabaseKind)]) -> QueryP
                         condition,
                     };
                 } else if is_cross_join {
-                    // Cross-DB cross join - executor will check for LIMIT
+                    // Cross-DB cross join — executor will reject if unbounded
                     root = PlanNode::Join {
                         left: Box::new(root),
                         right: Box::new(right_node),
                         condition,
                         strategy: JoinStrategy::NestedLoop,
                         join_kind: join.kind,
+                        limit: query.limit,
                     };
                 } else {
                     root = PlanNode::Join {
@@ -241,9 +265,13 @@ pub fn plan_query(query: &Query, source_db: &[(String, DatabaseKind)]) -> QueryP
                         condition,
                         strategy: JoinStrategy::NestedLoop,
                         join_kind: join.kind,
+                        limit: None,
                     };
                 }
             } else {
+                if join.kind == JoinKind::Cross && query.limit.is_none() {
+                    needs_default_cross_join_limit = true;
+                }
                 root = PlanNode::Join {
                     left: Box::new(root),
                     right: Box::new(right_node),
@@ -256,6 +284,7 @@ pub fn plan_query(query: &Query, source_db: &[(String, DatabaseKind)]) -> QueryP
                         _ => JoinStrategy::Hash,
                     },
                     join_kind: join.kind,
+                    limit: if join.kind == JoinKind::Cross { query.limit } else { None },
                 };
             }
         }
@@ -291,13 +320,7 @@ pub fn plan_query(query: &Query, source_db: &[(String, DatabaseKind)]) -> QueryP
             input: Box::new(current),
             group_by: query.group_by.clone(),
             aggs,
-        };
-    }
-
-    if let Some(having) = &query.having {
-        current = PlanNode::Filter {
-            input: Box::new(current),
-            condition: having.clone(),
+            having: query.having.clone(),
         };
     }
 
@@ -325,10 +348,16 @@ pub fn plan_query(query: &Query, source_db: &[(String, DatabaseKind)]) -> QueryP
         };
     }
 
-    if query.limit.is_some() || query.offset.is_some() {
+    let effective_limit = if needs_default_cross_join_limit && query.limit.is_none() {
+        Some(CROSS_DB_BATCH_SIZE as u64)
+    } else {
+        query.limit
+    };
+
+    if effective_limit.is_some() || query.offset.is_some() {
         current = PlanNode::Limit {
             input: Box::new(current),
-            limit: query.limit.unwrap_or(u64::MAX),
+            limit: effective_limit.unwrap_or(u64::MAX),
             offset: query.offset.unwrap_or(0),
         };
     }
@@ -342,18 +371,393 @@ pub fn plan_statement(
 ) -> QueryPlan {
     match stmt {
         Statement::Query(q) => plan_query(q, source_db),
-        Statement::Insert(_)
-        | Statement::Update(_)
-        | Statement::Delete(_)
-        | Statement::With(_)
+        Statement::ShowTables(conn) => {
+            let db = resolve_connection(conn, source_db);
+            match db {
+                Some(database) => QueryPlan {
+                    root: PlanNode::ListTables { database },
+                },
+                None => QueryPlan {
+                    root: PlanNode::Empty,
+                },
+            }
+        }
+        Statement::Describe(desc) => {
+            let db = resolve_connection(&desc.connection, source_db);
+            match db {
+                Some(database) => QueryPlan {
+                    root: PlanNode::DescribeTable {
+                        database,
+                        table: desc.table.clone(),
+                    },
+                },
+                None => QueryPlan {
+                    root: PlanNode::Empty,
+                },
+            }
+        }
+        Statement::Insert(insert) => {
+            let db = resolve_connection(&insert.connection, source_db);
+            match db {
+                Some((db_name, db_kind)) => {
+                    let dialect = dialect_for_kind(&db_kind);
+                    let sql = crate::engine::translator::translate_statement_sql(stmt, &*dialect);
+                    QueryPlan {
+                        root: PlanNode::Dml {
+                            database: (db_name, db_kind),
+                            sql,
+                        },
+                    }
+                }
+                None => QueryPlan {
+                    root: PlanNode::Empty,
+                },
+            }
+        }
+        Statement::Update(update) => {
+            let db = resolve_connection(&update.connection, source_db);
+            match db {
+                Some((db_name, db_kind)) => {
+                    let dialect = dialect_for_kind(&db_kind);
+                    let sql = crate::engine::translator::translate_statement_sql(stmt, &*dialect);
+                    QueryPlan {
+                        root: PlanNode::Dml {
+                            database: (db_name, db_kind),
+                            sql,
+                        },
+                    }
+                }
+                None => QueryPlan {
+                    root: PlanNode::Empty,
+                },
+            }
+        }
+        Statement::Delete(delete) => {
+            let db = resolve_connection(&delete.connection, source_db);
+            match db {
+                Some((db_name, db_kind)) => {
+                    let dialect = dialect_for_kind(&db_kind);
+                    let sql = crate::engine::translator::translate_statement_sql(stmt, &*dialect);
+                    QueryPlan {
+                        root: PlanNode::Dml {
+                            database: (db_name, db_kind),
+                            sql,
+                        },
+                    }
+                }
+                None => QueryPlan {
+                    root: PlanNode::Empty,
+                },
+            }
+        }
+        Statement::With(_)
         | Statement::SetOp(_)
         | Statement::Explain(_)
-        | Statement::Describe(_)
-        | Statement::ShowTables(_)
         | Statement::ParamAssign { .. }
         | Statement::Noop => QueryPlan {
             root: PlanNode::Empty,
         },
+    }
+}
+
+fn resolve_connection(
+    conn: &Option<String>,
+    source_db: &[(String, DatabaseKind)],
+) -> Option<(String, DatabaseKind)> {
+    if let Some(name) = conn {
+        source_db.iter().find(|(n, _)| n == name).cloned()
+    } else {
+        source_db.first().cloned()
+    }
+}
+
+    fn dialect_for_kind(kind: &DatabaseKind) -> Box<dyn crate::engine::translator::SqlDialect> {
+    crate::engine::translator::dialect_for(kind)
+}
+
+pub fn format_plan(node: &PlanNode) -> Vec<String> {
+    let mut lines = Vec::new();
+    format_node(node, &mut lines, String::new(), true);
+    lines
+}
+
+fn format_node(node: &PlanNode, lines: &mut Vec<String>, prefix: String, is_last: bool) {
+    let connector = if prefix.is_empty() {
+        String::new()
+    } else if is_last {
+        format!("{}└─ ", prefix)
+    } else {
+        format!("{}├─ ", prefix)
+    };
+    let child_prefix = if prefix.is_empty() {
+        String::from("  ")
+    } else if is_last {
+        format!("{}   ", prefix)
+    } else {
+        format!("{}│  ", prefix)
+    };
+
+    match node {
+        PlanNode::Scan { source, database, filter } => {
+            let db_str = match database {
+                Some((name, kind)) => format!("{name} → {kind:?}"),
+                None => "no database".to_string(),
+            };
+            let mut desc = match &source.kind {
+                crate::lang::ast::SourceKind::Table(t) => {
+                    if source.name != *t {
+                        format!("Scan: {} ({db_str})", source.name)
+                    } else {
+                        format!("Scan: {t} ({db_str})")
+                    }
+                }
+                crate::lang::ast::SourceKind::Subquery(_) => {
+                    format!("Scan: <subquery> as {} ({db_str})", source.name)
+                }
+                crate::lang::ast::SourceKind::CteRef(n) => {
+                    format!("Scan: CTE \"{n}\"")
+                }
+            };
+            if let Some(alias) = &source.alias {
+                let table_name = match &source.kind {
+                    crate::lang::ast::SourceKind::Table(t) => t.as_str(),
+                    _ => "",
+                };
+                if alias != table_name && alias != &source.name {
+                    desc.push_str(&format!(" AS {alias}"));
+                }
+            }
+            if let Some(f) = filter {
+                desc.push_str(&format!(" [filter: {}]", expr_str(f)));
+            }
+            lines.push(format!("{connector}{desc}"));
+        }
+        PlanNode::Filter { input, condition } => {
+            lines.push(format!("{connector}Filter: {}", expr_str(condition)));
+            format_node(input, lines, child_prefix, true);
+        }
+        PlanNode::Project { input, fields } => {
+            let proj_str: Vec<String> = fields
+                .iter()
+                .map(|p| match p {
+                    crate::lang::ast::Projection::Wildcard => "*".to_string(),
+                    crate::lang::ast::Projection::QualifiedWildcard(t) => format!("{t}.*"),
+                    crate::lang::ast::Projection::Expr(e, alias) => {
+                        let e_str = expr_str(e);
+                        match alias {
+                            Some(a) => format!("{e_str} AS {a}"),
+                            None => e_str,
+                        }
+                    }
+                })
+                .collect();
+            lines.push(format!("{connector}Project [{}]", proj_str.join(", ")));
+            format_node(input, lines, child_prefix, true);
+        }
+        PlanNode::Order { input, order_by } => {
+            let orders: Vec<String> = order_by
+                .iter()
+                .map(|o| {
+                    let e = expr_str(&o.expr);
+                    let dir = match o.direction {
+                        crate::lang::ast::OrderDir::Asc => "ASC",
+                        crate::lang::ast::OrderDir::Desc => "DESC",
+                    };
+                    format!("{e} {dir}")
+                })
+                .collect();
+            lines.push(format!("{connector}Order: {}", orders.join(", ")));
+            format_node(input, lines, child_prefix, true);
+        }
+        PlanNode::Limit { input, limit, offset } => {
+            let mut desc = format!("Limit: {limit}");
+            if *offset > 0 {
+                desc.push_str(&format!(" offset {offset}"));
+            }
+            lines.push(format!("{connector}{desc}"));
+            format_node(input, lines, child_prefix, true);
+        }
+        PlanNode::Aggregate { input, group_by, aggs, having } => {
+            let groups: Vec<String> = group_by.iter().map(|e| expr_str(e)).collect();
+            let agg_strs: Vec<String> = aggs
+                .iter()
+                .map(|(e, alias)| {
+                    let s = expr_str(e);
+                    match alias {
+                        Some(a) => format!("{s} AS {a}"),
+                        None => s,
+                    }
+                })
+                .collect();
+            let mut desc = format!("Aggregate [{}]", agg_strs.join(", "));
+            if !groups.is_empty() {
+                desc.push_str(&format!(" GROUP BY [{}]", groups.join(", ")));
+            }
+            if let Some(h) = having {
+                desc.push_str(&format!(" HAVING {}", expr_str(h)));
+            }
+            lines.push(format!("{connector}{desc}"));
+            format_node(input, lines, child_prefix, true);
+        }
+        PlanNode::Distinct { input } => {
+            lines.push(format!("{connector}Distinct"));
+            format_node(input, lines, child_prefix, true);
+        }
+        PlanNode::Join { left, right, condition, strategy, join_kind, limit } => {
+            let kind_str = match join_kind {
+                crate::lang::ast::JoinKind::Inner => "INNER JOIN",
+                crate::lang::ast::JoinKind::Left => "LEFT JOIN",
+                crate::lang::ast::JoinKind::Right => "RIGHT JOIN",
+                crate::lang::ast::JoinKind::Full => "FULL JOIN",
+                crate::lang::ast::JoinKind::Cross => "CROSS JOIN",
+            };
+            let mut desc = format!("{kind_str} (strategy: {strategy:?})");
+            if !matches!(condition, crate::lang::ast::Expression::Boolean(true)) {
+                desc.push_str(&format!(" ON {}", expr_str(condition)));
+            }
+            if let Some(lim) = limit {
+                desc.push_str(&format!(" [limit: {lim}]"));
+            }
+            lines.push(format!("{connector}{desc}"));
+            format_node(left, lines, child_prefix.clone(), false);
+            format_node(right, lines, child_prefix, true);
+        }
+        PlanNode::Union { left, right, all } => {
+            let kind = if *all { "UNION ALL" } else { "UNION" };
+            lines.push(format!("{connector}{kind}"));
+            format_node(left, lines, child_prefix.clone(), false);
+            format_node(right, lines, child_prefix, true);
+        }
+        PlanNode::SemiJoinFetch {
+            build,
+            probe_source,
+            probe_database,
+            build_key,
+            probe_key,
+            join_kind,
+            condition,
+        } => {
+            let kind_str = match join_kind {
+                crate::lang::ast::JoinKind::Inner => "INNER JOIN",
+                crate::lang::ast::JoinKind::Left => "LEFT JOIN",
+                crate::lang::ast::JoinKind::Right => "RIGHT JOIN",
+                crate::lang::ast::JoinKind::Full => "FULL JOIN",
+                crate::lang::ast::JoinKind::Cross => "CROSS JOIN",
+            };
+            lines.push(format!(
+                "{connector}SemiJoinFetch ({kind_str}) — probe {}.{} @ {}:{:?} ON {}",
+                probe_source.name,
+                expr_str(probe_key),
+                probe_database.0,
+                probe_database.1,
+                expr_str(condition),
+            ));
+            lines.push(format!(
+                "{child_prefix}build key: {}",
+                expr_str(build_key)
+            ));
+            format_node(build, lines, child_prefix, true);
+        }
+        PlanNode::InlineData { columns, rows } => {
+            lines.push(format!(
+                "{connector}InlineData: {} cols × {} rows",
+                columns.len(),
+                rows.len()
+            ));
+        }
+        PlanNode::ListTables { database } => {
+            lines.push(format!(
+                "{connector}ListTables @ {}:{:?}",
+                database.0, database.1
+            ));
+        }
+        PlanNode::DescribeTable { database, table } => {
+            lines.push(format!(
+                "{connector}DescribeTable \"{table}\" @ {}:{:?}",
+                database.0, database.1
+            ));
+        }
+        PlanNode::Dml { database, sql } => {
+            lines.push(format!(
+                "{connector}DML @ {}:{:?} — {sql}",
+                database.0, database.1
+            ));
+        }
+        PlanNode::Empty => {
+            lines.push(format!("{connector}(empty plan)"));
+        }
+    }
+}
+
+fn expr_str(expr: &crate::lang::ast::Expression) -> String {
+    match expr {
+        crate::lang::ast::Expression::Ident(n) => n.clone(),
+        crate::lang::ast::Expression::QualifiedIdent { table, field } => format!("{table}.{field}"),
+        crate::lang::ast::Expression::String(s) => format!("\"{s}\""),
+        crate::lang::ast::Expression::Number(n) => n.to_string(),
+        crate::lang::ast::Expression::Integer(i) => i.to_string(),
+        crate::lang::ast::Expression::Boolean(b) => b.to_string(),
+        crate::lang::ast::Expression::Null => "NULL".to_string(),
+        crate::lang::ast::Expression::BinaryOp { op, left, right } => {
+            let op_str = match op {
+                crate::lang::ast::BinaryOp::Eq => "=",
+                crate::lang::ast::BinaryOp::Neq => "!=",
+                crate::lang::ast::BinaryOp::Gt => ">",
+                crate::lang::ast::BinaryOp::Gte => ">=",
+                crate::lang::ast::BinaryOp::Lt => "<",
+                crate::lang::ast::BinaryOp::Lte => "<=",
+                crate::lang::ast::BinaryOp::And => "AND",
+                crate::lang::ast::BinaryOp::Or => "OR",
+                crate::lang::ast::BinaryOp::Add => "+",
+                crate::lang::ast::BinaryOp::Sub => "-",
+                crate::lang::ast::BinaryOp::Mul => "*",
+                crate::lang::ast::BinaryOp::Div => "/",
+                crate::lang::ast::BinaryOp::Mod => "%",
+                crate::lang::ast::BinaryOp::Concat => "||",
+                crate::lang::ast::BinaryOp::Like => "LIKE",
+                crate::lang::ast::BinaryOp::ILike => "ILIKE",
+                _ => "?",
+            };
+            format!("{} {} {}", expr_str(left), op_str, expr_str(right))
+        }
+        crate::lang::ast::Expression::UnaryOp { op, expr: e } => {
+            let op_str = match op {
+                crate::lang::ast::UnaryOp::Not => "NOT",
+                crate::lang::ast::UnaryOp::Neg => "-",
+            };
+            format!("{op_str}({})", expr_str(e))
+        }
+        crate::lang::ast::Expression::FnCall { name, args } => {
+            let args_str: Vec<String> = args.iter().map(|a| expr_str(a)).collect();
+            format!("{name}({})", args_str.join(", "))
+        }
+        crate::lang::ast::Expression::Aggregate { name, distinct, args } => {
+            let distinct_str = if *distinct { "DISTINCT " } else { "" };
+            if args.is_empty() {
+                format!("{name}({distinct_str}*)")
+            } else {
+                let args_str: Vec<String> = args.iter().map(|a| expr_str(a)).collect();
+                format!("{name}({distinct_str}{})", args_str.join(", "))
+            }
+        }
+        crate::lang::ast::Expression::Between { expr: e, low, high } => {
+            format!(
+                "{} BETWEEN {} AND {}",
+                expr_str(e),
+                expr_str(low),
+                expr_str(high)
+            )
+        }
+        crate::lang::ast::Expression::Cast { expr: e, target } => {
+            format!("CAST({} AS {target:?})", expr_str(e))
+        }
+        crate::lang::ast::Expression::Exists(_q, is_exists) => {
+            let prefix = if *is_exists { "EXISTS" } else { "NOT EXISTS" };
+            format!("{prefix}(<subquery>)")
+        }
+        crate::lang::ast::Expression::Subquery(_) => "<subquery>".to_string(),
+        crate::lang::ast::Expression::NamedParam(name) => format!("${name}"),
+        _ => format!("{expr:?}"),
     }
 }
 
@@ -396,6 +800,15 @@ fn collect_databases(node: &PlanNode, out: &mut Vec<(String, DatabaseKind)>) {
         PlanNode::SemiJoinFetch { build, probe_database, .. } => {
             collect_databases(build, out);
             out.push(probe_database.clone());
+        }
+        PlanNode::ListTables { database } => {
+            out.push(database.clone());
+        }
+        PlanNode::DescribeTable { database, .. } => {
+            out.push(database.clone());
+        }
+        PlanNode::Dml { database, .. } => {
+            out.push(database.clone());
         }
         PlanNode::InlineData { .. } | PlanNode::Empty => {}
     }

@@ -3,48 +3,33 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
-use sqlx::postgres::{PgPoolOptions, PgRow};
+use sqlx::sqlite::{SqlitePoolOptions, SqliteRow};
 use sqlx::AssertSqlSafe;
 use sqlx::Column;
 use sqlx::Row;
-
-use rust_decimal::Decimal;
 
 use super::{ColumnInfo, DatabaseAdapter, QueryResult, TableInfo, TableSchema, Value};
 use crate::connection::{ConnectionConfig, DatabaseKind};
 use crate::error::RiverError;
 
-pub struct PostgresAdapter {
-    pool: sqlx::PgPool,
+pub struct SQLiteAdapter {
+    pool: sqlx::SqlitePool,
 }
 
-fn row_to_values(row: &PgRow) -> Vec<Value> {
+fn row_to_values(row: &SqliteRow) -> Vec<Value> {
     let n = row.columns().len();
     let mut values = Vec::with_capacity(n);
     for i in 0..n {
         let val = row
-            .try_get::<Option<i32>, _>(i)
+            .try_get::<Option<String>, _>(i)
             .ok()
             .flatten()
-            .map(|v| Value::Int(v as i64))
+            .map(Value::String)
             .or_else(|| {
                 row.try_get::<Option<i64>, _>(i)
                     .ok()
                     .flatten()
                     .map(Value::Int)
-            })
-            .or_else(|| {
-                row.try_get::<Option<Decimal>, _>(i)
-                    .ok()
-                    .flatten()
-                    .map(|d| {
-                        if d.scale() == 0 {
-                            Value::Int(d.mantissa() as i64)
-                        } else {
-                            use rust_decimal::prelude::ToPrimitive;
-                            Value::Float(d.to_f64().unwrap_or(0.0))
-                        }
-                    })
             })
             .or_else(|| {
                 row.try_get::<Option<f64>, _>(i)
@@ -53,28 +38,22 @@ fn row_to_values(row: &PgRow) -> Vec<Value> {
                     .map(Value::Float)
             })
             .or_else(|| {
-                row.try_get::<Option<f32>, _>(i)
-                    .ok()
-                    .flatten()
-                    .map(|v| Value::Float(v as f64))
-            })
-            .or_else(|| {
                 row.try_get::<Option<bool>, _>(i)
                     .ok()
                     .flatten()
                     .map(Value::Bool)
             })
             .or_else(|| {
-                row.try_get::<Option<time::OffsetDateTime>, _>(i)
-                    .ok()
-                    .flatten()
-                    .map(|dt| Value::String(super::format_offset_dt(dt)))
-            })
-            .or_else(|| {
                 row.try_get::<Option<time::PrimitiveDateTime>, _>(i)
                     .ok()
                     .flatten()
                     .map(|dt| Value::String(super::format_primitive_dt(dt)))
+            })
+            .or_else(|| {
+                row.try_get::<Option<time::OffsetDateTime>, _>(i)
+                    .ok()
+                    .flatten()
+                    .map(|dt| Value::String(super::format_offset_dt(dt)))
             })
             .or_else(|| {
                 row.try_get::<Option<time::Date>, _>(i)
@@ -88,12 +67,6 @@ fn row_to_values(row: &PgRow) -> Vec<Value> {
                     .flatten()
                     .map(|t| Value::String(super::format_time(t)))
             })
-            .or_else(|| {
-                row.try_get::<Option<String>, _>(i)
-                    .ok()
-                    .flatten()
-                    .map(Value::String)
-            })
             .unwrap_or(Value::Null);
         values.push(val);
     }
@@ -101,9 +74,9 @@ fn row_to_values(row: &PgRow) -> Vec<Value> {
 }
 
 #[async_trait]
-impl DatabaseAdapter for PostgresAdapter {
+impl DatabaseAdapter for SQLiteAdapter {
     async fn connect(config: &ConnectionConfig) -> Result<Self, RiverError> {
-        let pool = PgPoolOptions::new()
+        let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect(&config.uri)
             .await?;
@@ -111,7 +84,7 @@ impl DatabaseAdapter for PostgresAdapter {
     }
 
     fn dialect(&self) -> DatabaseKind {
-        DatabaseKind::Postgres
+        DatabaseKind::SQLite
     }
 
     async fn execute(&self, query: &str) -> Result<QueryResult, RiverError> {
@@ -140,40 +113,33 @@ impl DatabaseAdapter for PostgresAdapter {
     }
 
     async fn list_tables(&self) -> Result<Vec<TableInfo>, RiverError> {
-        let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT table_schema, table_name FROM information_schema.tables \
-             WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('information_schema', 'pg_catalog') \
-             ORDER BY table_schema, table_name",
+        let rows = sqlx::query_as::<_, (String,)>(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await?;
 
         Ok(rows
             .into_iter()
-            .map(|(schema, name)| TableInfo {
-                name,
-                schema: Some(schema),
-            })
+            .map(|(name,)| TableInfo { name, schema: None })
             .collect())
     }
 
     async fn describe_table(&self, table: &str) -> Result<TableSchema, RiverError> {
-        let rows = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT column_name, data_type, is_nullable \
-             FROM information_schema.columns \
-             WHERE table_name = $1 ORDER BY ordinal_position",
+        let query = format!("PRAGMA table_info('{}')", table);
+        let rows = sqlx::query_as::<_, (i32, String, String, i32, String, i32)>(
+            AssertSqlSafe(query),
         )
-        .bind(table)
         .fetch_all(&self.pool)
         .await?;
 
         let columns = rows
             .into_iter()
-            .map(|(name, data_type, nullable)| ColumnInfo {
+            .map(|(_, name, data_type, not_null, _, pk)| ColumnInfo {
                 name,
                 data_type,
-                nullable: nullable == "YES",
-                is_primary_key: false,
+                nullable: not_null == 0,
+                is_primary_key: pk != 0,
             })
             .collect();
 

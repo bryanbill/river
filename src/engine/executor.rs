@@ -33,7 +33,7 @@ fn plan_has_limit(node: &PlanNode) -> bool {
         PlanNode::Join { left, right, .. }
         | PlanNode::Union { left, right, .. } => plan_has_limit(left) || plan_has_limit(right),
         PlanNode::SemiJoinFetch { build, .. } => plan_has_limit(build),
-        PlanNode::Scan { .. } | PlanNode::InlineData { .. } | PlanNode::Empty => false,
+        PlanNode::Scan { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } => false,
     }
 }
 
@@ -49,7 +49,17 @@ pub async fn execute_statement(
                 let cte_stmt = Statement::Query(*cte.query.clone());
                 let mut plan = crate::engine::planner::plan_statement(&cte_stmt, source_db);
                 replace_cte_scans(&mut plan.root, &cte_data);
-                let result = execute_plan(&plan, adapters).await?;
+                let mut result = execute_plan(&plan, adapters).await?;
+
+                // Handle set operations in CTE body (UNION, INTERSECT, etc.)
+                for (kind, q) in &cte.chain {
+                    let chain_stmt = Statement::Query(q.clone());
+                    let mut chain_plan = crate::engine::planner::plan_statement(&chain_stmt, source_db);
+                    replace_cte_scans(&mut chain_plan.root, &cte_data);
+                    let right = execute_plan(&chain_plan, adapters).await?;
+                    result = union_results(result, right, matches!(kind, SetOpKind::UnionAll))?;
+                }
+
                 cte_data.insert(cte.name.clone(), result);
             }
             let mut plan = crate::engine::planner::plan_statement(w.body.as_ref(), source_db);
@@ -149,6 +159,9 @@ fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
             if l.0 == r.0 { Some(l) } else { None }
         }
         PlanNode::SemiJoinFetch { .. } => None,
+        PlanNode::ListTables { database } => Some(database.clone()),
+        PlanNode::DescribeTable { database, .. } => Some(database.clone()),
+        PlanNode::Dml { database, .. } => Some(database.clone()),
         PlanNode::InlineData { .. } | PlanNode::Empty => None,
     }
 }
@@ -187,9 +200,10 @@ fn collect_single_db_query(node: &PlanNode) -> Option<(String, DatabaseKind, Que
             q.offset = Some(*offset);
             Some((db_name, db_kind, q))
         }
-        PlanNode::Aggregate { input, group_by, aggs } => {
+        PlanNode::Aggregate { input, group_by, aggs, having } => {
             let (db_name, db_kind, mut q) = collect_single_db_query(input)?;
             q.group_by = group_by.clone();
+            q.having = having.clone();
             for (agg, alias) in aggs {
                 q.projection.push(Projection::Expr(agg.clone(), alias.clone()));
             }
@@ -200,7 +214,27 @@ fn collect_single_db_query(node: &PlanNode) -> Option<(String, DatabaseKind, Que
             q.distinct = true;
             Some((db_name, db_kind, q))
         }
-        PlanNode::Join { .. } | PlanNode::Union { .. } | PlanNode::SemiJoinFetch { .. } | PlanNode::InlineData { .. } | PlanNode::Empty => None,
+        PlanNode::Join { left, right, condition, join_kind, .. } => {
+            let (ldb_name, ldb_kind, mut q) = collect_single_db_query(left)?;
+            let (right_source, right_db) = match right.as_ref() {
+                PlanNode::Scan { source, database, .. } => {
+                    (source.clone(), database.clone())
+                }
+                _ => return None,
+            };
+            let right_db = right_db?;
+            if ldb_name != right_db.0 {
+                return None;
+            }
+            q.joins.push(Join {
+                kind: *join_kind,
+                source: right_source,
+                alias: None,
+                condition: Some(condition.clone()),
+            });
+            Some((ldb_name, ldb_kind, q))
+        }
+        PlanNode::Union { .. } | PlanNode::SemiJoinFetch { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } => None,
     }
 }
 
@@ -220,6 +254,7 @@ async fn execute_node(
             condition,
             strategy,
             join_kind,
+            limit,
         } => {
             // Guard: reject unbounded cross-DB cross joins (unless a LIMIT exists in the plan)
             if !bounded
@@ -243,7 +278,7 @@ async fn execute_node(
             let (lr, rr) = tokio::join!(left_fut, right_fut);
             let left_result = lr?;
             let right_result = rr?;
-            join_results(left_result, right_result, condition, strategy, *join_kind)
+            join_results(left_result, right_result, condition, strategy, *join_kind, *limit)
         }
         PlanNode::Filter { input, condition } => {
             let result = Box::pin(execute_node(input, adapters, bounded)).await?;
@@ -261,9 +296,13 @@ async fn execute_node(
             let result = Box::pin(execute_node(input, adapters, true)).await?;
             apply_limit(&result, *limit, *offset)
         }
-        PlanNode::Aggregate { input, group_by, aggs } => {
+        PlanNode::Aggregate { input, group_by, aggs, having } => {
             let result = Box::pin(execute_node(input, adapters, bounded)).await?;
-            apply_aggregate(&result, group_by, aggs)
+            let mut agg_result = apply_aggregate(&result, group_by, aggs)?;
+            if let Some(having_cond) = having {
+                agg_result = apply_filter(&agg_result, having_cond)?;
+            }
+            Ok(agg_result)
         }
         PlanNode::Distinct { input } => {
             let result = Box::pin(execute_node(input, adapters, bounded)).await?;
@@ -294,6 +333,57 @@ async fn execute_node(
                 build, probe_source, probe_database, build_key, probe_key,
                 *join_kind, condition, adapters,
             ).await
+        }
+        PlanNode::ListTables { database } => {
+            let adapter = adapters.get(&database.0).ok_or_else(|| {
+                RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
+            })?;
+            let tables = adapter.list_tables().await?;
+            let rows: Vec<Vec<Value>> = tables
+                .into_iter()
+                .map(|t| vec![Value::String(t.name)])
+                .collect();
+            Ok(QueryResult {
+                columns: vec!["table_name".to_string()],
+                rows,
+                elapsed: std::time::Duration::default(),
+                rows_affected: 0,
+            })
+        }
+        PlanNode::DescribeTable { database, table } => {
+            let adapter = adapters.get(&database.0).ok_or_else(|| {
+                RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
+            })?;
+            let schema = adapter.describe_table(&table).await?;
+            let rows: Vec<Vec<Value>> = schema
+                .columns
+                .into_iter()
+                .map(|c| {
+                    vec![
+                        Value::String(c.name),
+                        Value::String(c.data_type),
+                        Value::String(if c.nullable { "YES".to_string() } else { "NO".to_string() }),
+                        Value::String(if c.is_primary_key { "PK".to_string() } else { String::new() }),
+                    ]
+                })
+                .collect();
+            Ok(QueryResult {
+                columns: vec![
+                    "column_name".to_string(),
+                    "data_type".to_string(),
+                    "nullable".to_string(),
+                    "is_pk".to_string(),
+                ],
+                rows,
+                elapsed: std::time::Duration::default(),
+                rows_affected: 0,
+            })
+        }
+        PlanNode::Dml { database, sql } => {
+            let adapter = adapters.get(&database.0).ok_or_else(|| {
+                RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
+            })?;
+            adapter.execute(sql).await
         }
         PlanNode::Empty => Ok(empty_result()),
         PlanNode::Scan { source, .. } => {
@@ -444,6 +534,7 @@ fn join_results(
     condition: &Expression,
     strategy: &JoinStrategy,
     join_kind: JoinKind,
+    limit: Option<u64>,
 ) -> Result<QueryResult, RiverError> {
     let can_hash = matches!(strategy, JoinStrategy::Hash | JoinStrategy::Auto)
         && resolve_equi_columns(condition, &left.columns, &right.columns).is_some();
@@ -451,7 +542,7 @@ fn join_results(
     if can_hash {
         hash_join(left, right, condition, join_kind)
     } else {
-        nested_loop_join(left, right, condition, join_kind)
+        nested_loop_join(left, right, condition, join_kind, limit)
     }
 }
 
@@ -621,11 +712,33 @@ fn nested_loop_join(
     right: QueryResult,
     condition: &Expression,
     join_kind: JoinKind,
+    limit: Option<u64>,
 ) -> Result<QueryResult, RiverError> {
     let columns = merge_col_names(&left.columns, &right.columns);
     let right_col_count = right.columns.len();
     let left_col_count = left.columns.len();
     let mut rows: Vec<Vec<Value>> = Vec::new();
+
+    // Cross join: compute cartesian product directly (no condition evaluation needed)
+    if join_kind == JoinKind::Cross {
+        'outer: for l_row in &left.rows {
+            for r_row in &right.rows {
+                rows.push(merge_vals(l_row, r_row));
+                if let Some(lim) = limit {
+                    if rows.len() >= lim as usize {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        return Ok(QueryResult {
+            columns,
+            rows,
+            elapsed: std::time::Duration::default(),
+            rows_affected: 0,
+        });
+    }
+
     let mut left_matched: Vec<bool> = vec![false; left.rows.len()];
     let mut right_matched: Vec<bool> = vec![false; right.rows.len()];
 
@@ -637,27 +750,25 @@ fn nested_loop_join(
                 left_matched[li] = true;
                 right_matched[ri] = true;
             }
-        }
-    }
-
-    // Outer join support
-    let include_left = matches!(join_kind, JoinKind::Left | JoinKind::Full);
-    let include_right = matches!(join_kind, JoinKind::Right | JoinKind::Full);
-    let include_inner = matches!(join_kind, JoinKind::Inner | JoinKind::Cross);
-
-    // Cross join: include everything regardless of condition
-    if join_kind == JoinKind::Cross {
-        rows.clear();
-        for l_row in &left.rows {
-            for r_row in &right.rows {
-                rows.push(merge_vals(l_row, r_row));
+            if let Some(lim) = limit {
+                if rows.len() >= lim as usize {
+                    return Ok(QueryResult {
+                        columns,
+                        rows,
+                        elapsed: std::time::Duration::default(),
+                        rows_affected: 0,
+                    });
+                }
             }
         }
     }
 
-    if include_left || include_inner {
+    let include_left = matches!(join_kind, JoinKind::Left | JoinKind::Full);
+    let include_right = matches!(join_kind, JoinKind::Right | JoinKind::Full);
+
+    if include_left {
         for (li, &matched) in left_matched.iter().enumerate() {
-            if !matched && include_left {
+            if !matched {
                 let nulls = vec![Value::Null; right_col_count];
                 rows.push(merge_vals(&left.rows[li], &nulls));
             }
@@ -1377,7 +1488,7 @@ mod tests {
             left: Box::new(Expression::Ident("id".into())),
             right: Box::new(Expression::Ident("user_id".into())),
         };
-        let result = nested_loop_join(left, right, &cond, JoinKind::Inner).unwrap();
+        let result = nested_loop_join(left, right, &cond, JoinKind::Inner, None).unwrap();
         assert_eq!(result.rows.len(), 2);
     }
 
@@ -1392,7 +1503,7 @@ mod tests {
             vec![vec![Value::String("x".into())], vec![Value::String("y".into())]],
         );
         let cond = Expression::Boolean(true);
-        let result = nested_loop_join(left, right, &cond, JoinKind::Cross).unwrap();
+        let result = nested_loop_join(left, right, &cond, JoinKind::Cross, None).unwrap();
         assert_eq!(result.rows.len(), 4);
     }
 
@@ -1676,6 +1787,7 @@ mod tests {
             condition: Expression::Boolean(true),
             strategy: crate::engine::planner::JoinStrategy::Hash,
             join_kind: JoinKind::Inner,
+            limit: None,
         };
         assert!(is_cross_db(&plan));
     }
@@ -1707,6 +1819,7 @@ mod tests {
             condition: Expression::Boolean(true),
             strategy: crate::engine::planner::JoinStrategy::Hash,
             join_kind: JoinKind::Inner,
+            limit: None,
         };
         assert!(!is_cross_db(&plan));
     }
@@ -1738,6 +1851,7 @@ mod tests {
             condition: Expression::Boolean(true),
             strategy: crate::engine::planner::JoinStrategy::Hash,
             join_kind: JoinKind::Inner,
+            limit: None,
         };
         let dbs = find_all_databases(&plan);
         assert_eq!(dbs.len(), 2);
@@ -1819,6 +1933,7 @@ mod tests {
             condition: Expression::Boolean(true),
             strategy: crate::engine::planner::JoinStrategy::Hash,
             join_kind: JoinKind::Inner,
+            limit: None,
         };
         assert!(collect_single_db_query(&join).is_none());
     }

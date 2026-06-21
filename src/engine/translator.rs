@@ -99,6 +99,16 @@ impl SqlDialect for SQLiteDialect {
     }
 }
 
+pub fn dialect_for(kind: &DatabaseKind) -> Box<dyn SqlDialect> {
+    match kind {
+        DatabaseKind::Postgres => Box::new(PostgresDialect),
+        DatabaseKind::MySQL => Box::new(MySQLDialect),
+        DatabaseKind::MSSQL => Box::new(MSSQLDialect),
+        DatabaseKind::SQLite => Box::new(SQLiteDialect),
+        DatabaseKind::MongoDB => Box::new(PostgresDialect), // fallback
+    }
+}
+
 fn escape_sql_string(s: &str) -> String {
     s.replace('\'', "''")
 }
@@ -260,8 +270,20 @@ fn translate_binary_sql(
     let right_s = translate_expr(right, dialect);
 
     match op {
-        BinaryOp::In => format!("{} IN ({})", left_s, right_s),
-        BinaryOp::NotIn => format!("{} NOT IN ({})", left_s, right_s),
+        BinaryOp::In => match right {
+            Expression::Array(items) => {
+                let list: Vec<String> = items.iter().map(|e| translate_expr(e, dialect)).collect();
+                format!("{} IN ({})", left_s, list.join(", "))
+            }
+            _ => format!("{} IN ({})", left_s, right_s),
+        },
+        BinaryOp::NotIn => match right {
+            Expression::Array(items) => {
+                let list: Vec<String> = items.iter().map(|e| translate_expr(e, dialect)).collect();
+                format!("{} NOT IN ({})", left_s, list.join(", "))
+            }
+            _ => format!("{} NOT IN ({})", left_s, right_s),
+        },
         BinaryOp::Like => format!("{} LIKE {}", left_s, right_s),
         BinaryOp::ILike => {
             if dialect.kind() == DatabaseKind::Postgres {
@@ -475,7 +497,9 @@ pub fn translate_query(query: &Query, dialect: &dyn SqlDialect) -> String {
             JoinKind::Cross => "CROSS JOIN",
         };
         let source_str = translate_source_sql(&join.source, dialect);
-        let on_str = if let Some(cond) = &join.condition {
+        let on_str = if join.kind == JoinKind::Cross {
+            String::new()
+        } else if let Some(cond) = &join.condition {
             format!(" ON {}", translate_expr(cond, dialect))
         } else {
             String::new()
@@ -527,11 +551,16 @@ fn translate_source_sql(source: &Source, dialect: &dyn SqlDialect) -> String {
     let name = match &source.kind {
         SourceKind::Table(t) => dialect.quote_ident(t),
         SourceKind::Subquery(q) => format!("({})", translate_query(q, dialect)),
-        SourceKind::CteRef(name) => dialect.quote_ident(name),
+        SourceKind::CteRef(cte_name) => dialect.quote_ident(cte_name),
     };
 
     if let Some(alias) = &source.alias {
-        if alias != &source.name {
+        let table_name = match &source.kind {
+            SourceKind::Table(t) => t.as_str(),
+            SourceKind::CteRef(n) => n.as_str(),
+            SourceKind::Subquery(_) => "",
+        };
+        if alias != table_name {
             format!("{} AS {}", name, dialect.quote_ident(alias))
         } else {
             name

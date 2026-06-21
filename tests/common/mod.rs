@@ -4,8 +4,7 @@ use std::collections::HashMap;
 
 use river::adapters::{create_adapter, DatabaseAdapter, QueryResult, Value};
 use river::connection::{ConnectionConfig, DatabaseKind};
-use river::engine::executor::execute_plan;
-use river::engine::planner::plan_statement;
+use river::engine::executor::execute_statement;
 use river::error::RiverError;
 use river::lang::parse;
 
@@ -65,8 +64,7 @@ impl TestContext {
 /// Parse a RiverQL query, plan it, and execute it against the test context's adapters.
 pub async fn execute_river(ctx: &TestContext, query: &str) -> Result<QueryResult, RiverError> {
     let stmt = parse(query)?;
-    let plan = plan_statement(&stmt, &ctx.source_db);
-    execute_plan(&plan, &ctx.adapters).await
+    execute_statement(&stmt, &ctx.source_db, &ctx.adapters).await
 }
 
 // ── Assertion Helpers ─────────────────────────────────────────────────────────

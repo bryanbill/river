@@ -2434,6 +2434,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tiberius",
+ "time",
  "tokio",
  "tokio-postgres",
  "tokio-util",
@@ -2964,6 +2965,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -3035,6 +3037,7 @@ dependencies = [
  "sha2 0.11.0",
  "sqlx-core",
  "thiserror 2.0.18",
+ "time",
  "tracing",
 ]
 
@@ -3070,6 +3073,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.18",
+ "time",
  "tracing",
  "whoami",
 ]
@@ -3094,6 +3098,7 @@ dependencies = [
  "serde",
  "sqlx-core",
  "thiserror 2.0.18",
+ "time",
  "tracing",
  "url",
 ]
@@ -3328,6 +3333,7 @@ dependencies = [
  "pin-project-lite",
  "pretty-hex",
  "thiserror 1.0.69",
+ "time",
  "tracing",
  "uuid",
  "winauth",

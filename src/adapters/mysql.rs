@@ -28,6 +28,12 @@ fn row_to_values(row: &MySqlRow) -> Vec<Value> {
             .flatten()
             .map(Value::Int)
             .or_else(|| {
+                row.try_get::<Option<u64>, _>(i)
+                    .ok()
+                    .flatten()
+                    .map(|v| Value::Int(v as i64))
+            })
+            .or_else(|| {
                 row.try_get::<Option<Decimal>, _>(i)
                     .ok()
                     .flatten()
@@ -51,6 +57,30 @@ fn row_to_values(row: &MySqlRow) -> Vec<Value> {
                     .ok()
                     .flatten()
                     .map(Value::Bool)
+            })
+            .or_else(|| {
+                row.try_get::<Option<time::PrimitiveDateTime>, _>(i)
+                    .ok()
+                    .flatten()
+                    .map(|dt| Value::String(super::format_primitive_dt(dt)))
+            })
+            .or_else(|| {
+                row.try_get::<Option<time::OffsetDateTime>, _>(i)
+                    .ok()
+                    .flatten()
+                    .map(|dt| Value::String(super::format_offset_dt(dt)))
+            })
+            .or_else(|| {
+                row.try_get::<Option<time::Date>, _>(i)
+                    .ok()
+                    .flatten()
+                    .map(|d| Value::String(super::format_date(d)))
+            })
+            .or_else(|| {
+                row.try_get::<Option<time::Time>, _>(i)
+                    .ok()
+                    .flatten()
+                    .map(|t| Value::String(super::format_time(t)))
             })
             .or_else(|| {
                 row.try_get::<Option<String>, _>(i)
