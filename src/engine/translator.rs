@@ -3,6 +3,7 @@
 use serde_json::json;
 use serde_json::Value as JsonValue;
 
+use crate::adapters::Value;
 use crate::connection::DatabaseKind;
 use crate::lang::ast::*;
 
@@ -973,5 +974,67 @@ pub fn translate_query_mongo(query: &Query, database: &str) -> JsonValue {
         "database": database,
         "collection": source_name,
         "pipeline": pipeline,
+    })
+}
+
+// ── Cross-DB pushdown helpers ─────────────────────────────────────────────
+
+pub fn translate_in_list(column: &str, values: &[Value], dialect: &dyn SqlDialect) -> String {
+    if values.is_empty() {
+        return "1=0".to_string();
+    }
+    let col = dialect.quote_ident(column);
+    let vals: Vec<String> = values
+        .iter()
+        .filter_map(|v| match v {
+            Value::Null => None,
+            Value::Int(i) => Some(i.to_string()),
+            Value::Float(f) => Some(f.to_string()),
+            Value::String(s) => Some(format!("'{}'", escape_sql_string(s))),
+            Value::Bool(b) => Some(if *b { "TRUE".into() } else { "FALSE".into() }),
+        })
+        .collect();
+    if vals.is_empty() {
+        return "1=0".to_string();
+    }
+    format!("{} IN ({})", col, vals.join(", "))
+}
+
+pub fn translate_in_list_mongo(column: &str, values: &[Value]) -> JsonValue {
+    let vals: Vec<JsonValue> = values
+        .iter()
+        .filter_map(|v| match v {
+            Value::Null => None,
+            Value::Int(i) => Some(json!(i)),
+            Value::Float(f) => Some(json!(f)),
+            Value::String(s) => Some(json!(s)),
+            Value::Bool(b) => Some(json!(b)),
+        })
+        .collect();
+    json!({ column: { "$in": vals } })
+}
+
+pub fn build_probe_query_sql(
+    table: &str,
+    key_column: &str,
+    values: &[Value],
+    dialect: &dyn SqlDialect,
+) -> String {
+    let table_quoted = dialect.quote_ident(table);
+    let in_clause = translate_in_list(key_column, values, dialect);
+    format!("SELECT * FROM {} WHERE {}", table_quoted, in_clause)
+}
+
+pub fn build_probe_query_mongo(
+    collection: &str,
+    key_column: &str,
+    values: &[Value],
+    database: &str,
+) -> JsonValue {
+    let match_stage = translate_in_list_mongo(key_column, values);
+    json!({
+        "database": database,
+        "collection": collection,
+        "pipeline": [{ "$match": match_stage }],
     })
 }
