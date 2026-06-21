@@ -3,6 +3,8 @@
 use crate::connection::DatabaseKind;
 use crate::lang::ast::*;
 
+pub const CROSS_DB_BATCH_SIZE: usize = 1000;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum JoinStrategy {
     NestedLoop,
@@ -32,7 +34,7 @@ pub enum PlanNode {
     Aggregate {
         input: Box<PlanNode>,
         group_by: Vec<Expression>,
-        aggs: Vec<Expression>,
+        aggs: Vec<(Expression, Option<String>)>,
     },
     Limit {
         input: Box<PlanNode>,
@@ -54,6 +56,19 @@ pub enum PlanNode {
         left: Box<PlanNode>,
         right: Box<PlanNode>,
         all: bool,
+    },
+    SemiJoinFetch {
+        build: Box<PlanNode>,
+        probe_source: Source,
+        probe_database: (String, DatabaseKind),
+        build_key: Expression,
+        probe_key: Expression,
+        join_kind: JoinKind,
+        condition: Expression,
+    },
+    InlineData {
+        columns: Vec<String>,
+        rows: Vec<Vec<crate::adapters::Value>>,
     },
     Empty,
 }
@@ -78,19 +93,67 @@ fn resolve_database(
 }
 
 fn plan_source(source: &Source, source_db: &[(String, DatabaseKind)]) -> PlanNode {
-    let database = resolve_database(source, source_db);
     if let SourceKind::Subquery(subquery) = &source.kind {
         let inner_plan = plan_query(subquery, source_db);
-        PlanNode::Project {
+        return PlanNode::Project {
             input: Box::new(inner_plan.root),
             fields: vec![Projection::Wildcard],
-        }
+        };
+    }
+    let database = if matches!(&source.kind, SourceKind::CteRef(_)) {
+        None
     } else {
-        PlanNode::Scan {
-            source: source.clone(),
-            database,
-            filter: None,
+        resolve_database(source, source_db)
+    };
+    PlanNode::Scan {
+        source: source.clone(),
+        database,
+        filter: None,
+    }
+}
+
+fn extract_equi_keys(condition: &Expression) -> Option<(Expression, Expression)> {
+    match condition {
+        Expression::BinaryOp {
+            op: BinaryOp::Eq,
+            left,
+            right,
+        } => Some((*left.clone(), *right.clone())),
+        _ => None,
+    }
+}
+
+fn key_belongs_to_source(key: &Expression, source: &Source) -> bool {
+    match key {
+        Expression::QualifiedIdent { table, .. } => {
+            source.alias.as_deref() == Some(table) || source.name == *table
         }
+        Expression::Ident(_) => true,
+        _ => false,
+    }
+}
+
+fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
+    match node {
+        PlanNode::Scan { database, .. } => database.clone(),
+        PlanNode::Filter { input, .. }
+        | PlanNode::Project { input, .. }
+        | PlanNode::Order { input, .. }
+        | PlanNode::Limit { input, .. }
+        | PlanNode::Aggregate { input, .. }
+        | PlanNode::Distinct { input, .. } => find_single_db(input),
+        PlanNode::Join { left, right, .. } => {
+            let l = find_single_db(left)?;
+            let r = find_single_db(right)?;
+            if l.0 == r.0 { Some(l) } else { None }
+        }
+        PlanNode::Union { left, right, .. } => {
+            let l = find_single_db(left)?;
+            let r = find_single_db(right)?;
+            if l.0 == r.0 { Some(l) } else { None }
+        }
+        PlanNode::SemiJoinFetch { .. } => None,
+        PlanNode::InlineData { .. } | PlanNode::Empty => None,
     }
 }
 
@@ -111,23 +174,90 @@ pub fn plan_query(query: &Query, source_db: &[(String, DatabaseKind)]) -> QueryP
         }
 
         for join in &query.joins {
-            let right = plan_source(&join.source, source_db);
-            root = PlanNode::Join {
-                left: Box::new(root),
-                right: Box::new(right),
-                condition: join
-                    .condition
-                    .clone()
-                    .unwrap_or(Expression::Boolean(true)),
-                strategy: match join.kind {
-                    JoinKind::Inner => JoinStrategy::Hash,
-                    JoinKind::Left => JoinStrategy::Hash,
-                    JoinKind::Right => JoinStrategy::Hash,
-                    JoinKind::Full => JoinStrategy::Hash,
-                    JoinKind::Cross => JoinStrategy::NestedLoop,
-                },
-                join_kind: join.kind,
+            let right_node = plan_source(&join.source, source_db);
+            let left_db = find_single_db(&root);
+            let right_db = match &right_node {
+                PlanNode::Scan { database, .. } => database.clone(),
+                _ => None,
             };
+
+            let is_cross_db_join = match (&left_db, &right_db) {
+                (Some((ln, _)), Some((rn, _))) => ln != rn,
+                _ => false,
+            };
+
+            if is_cross_db_join {
+                let condition = join.condition.clone().unwrap_or(Expression::Boolean(true));
+                let is_cross_join = join.kind == JoinKind::Cross
+                    || matches!(&condition, Expression::Boolean(true));
+                let equi_keys = extract_equi_keys(&condition);
+
+                if let Some((left_key, right_key)) = equi_keys {
+                    let (probe_source, probe_database) = match &right_node {
+                        PlanNode::Scan { source, database, .. } => {
+                            (source.clone(), database.clone().unwrap())
+                        }
+                        _ => {
+                            root = PlanNode::Join {
+                                left: Box::new(root),
+                                right: Box::new(right_node),
+                                condition,
+                                strategy: JoinStrategy::Hash,
+                                join_kind: join.kind,
+                            };
+                            continue;
+                        }
+                    };
+
+                    let (build_key, probe_key) =
+                        if key_belongs_to_source(&right_key, &probe_source) {
+                            (left_key, right_key)
+                        } else {
+                            (right_key, left_key)
+                        };
+
+                    root = PlanNode::SemiJoinFetch {
+                        build: Box::new(root),
+                        probe_source,
+                        probe_database,
+                        build_key,
+                        probe_key,
+                        join_kind: join.kind,
+                        condition,
+                    };
+                } else if is_cross_join {
+                    // Cross-DB cross join - executor will check for LIMIT
+                    root = PlanNode::Join {
+                        left: Box::new(root),
+                        right: Box::new(right_node),
+                        condition,
+                        strategy: JoinStrategy::NestedLoop,
+                        join_kind: join.kind,
+                    };
+                } else {
+                    root = PlanNode::Join {
+                        left: Box::new(root),
+                        right: Box::new(right_node),
+                        condition,
+                        strategy: JoinStrategy::NestedLoop,
+                        join_kind: join.kind,
+                    };
+                }
+            } else {
+                root = PlanNode::Join {
+                    left: Box::new(root),
+                    right: Box::new(right_node),
+                    condition: join
+                        .condition
+                        .clone()
+                        .unwrap_or(Expression::Boolean(true)),
+                    strategy: match join.kind {
+                        JoinKind::Cross => JoinStrategy::NestedLoop,
+                        _ => JoinStrategy::Hash,
+                    },
+                    join_kind: join.kind,
+                };
+            }
         }
 
         root
@@ -146,12 +276,12 @@ pub fn plan_query(query: &Query, source_db: &[(String, DatabaseKind)]) -> QueryP
             .iter()
             .any(|p| matches!(p, Projection::Expr(Expression::Aggregate { .. }, _)))
     {
-        let aggs: Vec<Expression> = query
+        let aggs: Vec<(Expression, Option<String>)> = query
             .projection
             .iter()
             .filter_map(|p| match p {
-                Projection::Expr(e, _) if matches!(e, Expression::Aggregate { .. }) => {
-                    Some(e.clone())
+                Projection::Expr(e, alias) if matches!(e, Expression::Aggregate { .. }) => {
+                    Some((e.clone(), alias.clone()))
                 }
                 _ => None,
             })
@@ -178,21 +308,7 @@ pub fn plan_query(query: &Query, source_db: &[(String, DatabaseKind)]) -> QueryP
     }
 
     if !query.projection.is_empty() {
-        let has_aggregate = query
-            .projection
-            .iter()
-            .any(|p| matches!(p, Projection::Expr(Expression::Aggregate { .. }, _)));
-
-        let fields = if has_aggregate {
-            query
-                .projection
-                .iter()
-                .filter(|p| !matches!(p, Projection::Expr(Expression::Aggregate { .. }, _)))
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
-            query.projection.clone()
-        };
+        let fields = query.projection.clone();
 
         if !fields.is_empty() {
             current = PlanNode::Project {
@@ -277,6 +393,10 @@ fn collect_databases(node: &PlanNode, out: &mut Vec<(String, DatabaseKind)>) {
             collect_databases(left, out);
             collect_databases(right, out);
         }
-        PlanNode::Empty => {}
+        PlanNode::SemiJoinFetch { build, probe_database, .. } => {
+            collect_databases(build, out);
+            out.push(probe_database.clone());
+        }
+        PlanNode::InlineData { .. } | PlanNode::Empty => {}
     }
 }

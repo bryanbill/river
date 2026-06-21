@@ -20,6 +20,64 @@ pub async fn execute_plan(
     Ok(result)
 }
 
+pub async fn execute_statement(
+    stmt: &Statement,
+    source_db: &[(String, DatabaseKind)],
+    adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
+) -> Result<QueryResult, RiverError> {
+    match stmt {
+        Statement::With(w) => {
+            let mut cte_data: HashMap<String, QueryResult> = HashMap::new();
+            for cte in &w.ctes {
+                let cte_stmt = Statement::Query(*cte.query.clone());
+                let mut plan = crate::engine::planner::plan_statement(&cte_stmt, source_db);
+                replace_cte_scans(&mut plan.root, &cte_data);
+                let result = execute_plan(&plan, adapters).await?;
+                cte_data.insert(cte.name.clone(), result);
+            }
+            let mut plan = crate::engine::planner::plan_statement(w.body.as_ref(), source_db);
+            replace_cte_scans(&mut plan.root, &cte_data);
+            execute_plan(&plan, adapters).await
+        }
+        _ => {
+            let plan = crate::engine::planner::plan_statement(stmt, source_db);
+            execute_plan(&plan, adapters).await
+        }
+    }
+}
+
+fn replace_cte_scans(node: &mut PlanNode, cte_data: &HashMap<String, QueryResult>) {
+    match node {
+        PlanNode::Scan { source, database, .. } if database.is_none() => {
+            if let SourceKind::CteRef(name) = &source.kind {
+                if let Some(data) = cte_data.get(name) {
+                    *node = PlanNode::InlineData {
+                        columns: data.columns.clone(),
+                        rows: data.rows.clone(),
+                    };
+                }
+            }
+        }
+        PlanNode::Filter { input, .. }
+        | PlanNode::Project { input, .. }
+        | PlanNode::Order { input, .. }
+        | PlanNode::Limit { input, .. }
+        | PlanNode::Aggregate { input, .. }
+        | PlanNode::Distinct { input, .. } => {
+            replace_cte_scans(input, cte_data);
+        }
+        PlanNode::Join { left, right, .. }
+        | PlanNode::Union { left, right, .. } => {
+            replace_cte_scans(left, cte_data);
+            replace_cte_scans(right, cte_data);
+        }
+        PlanNode::SemiJoinFetch { build, .. } => {
+            replace_cte_scans(build, cte_data);
+        }
+        _ => {}
+    }
+}
+
 fn build_scan_query(source: &Source) -> Query {
     let mut q = Query::default();
     q.sources.push(source.clone());
@@ -73,7 +131,8 @@ fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
             let r = find_single_db(right)?;
             if l.0 == r.0 { Some(l) } else { None }
         }
-        PlanNode::Empty => None,
+        PlanNode::SemiJoinFetch { .. } => None,
+        PlanNode::InlineData { .. } | PlanNode::Empty => None,
     }
 }
 
@@ -114,8 +173,8 @@ fn collect_single_db_query(node: &PlanNode) -> Option<(String, DatabaseKind, Que
         PlanNode::Aggregate { input, group_by, aggs } => {
             let (db_name, db_kind, mut q) = collect_single_db_query(input)?;
             q.group_by = group_by.clone();
-            for agg in aggs {
-                q.projection.push(Projection::Expr(agg.clone(), None));
+            for (agg, alias) in aggs {
+                q.projection.push(Projection::Expr(agg.clone(), alias.clone()));
             }
             Some((db_name, db_kind, q))
         }
@@ -124,7 +183,7 @@ fn collect_single_db_query(node: &PlanNode) -> Option<(String, DatabaseKind, Que
             q.distinct = true;
             Some((db_name, db_kind, q))
         }
-        PlanNode::Join { .. } | PlanNode::Union { .. } | PlanNode::Empty => None,
+        PlanNode::Join { .. } | PlanNode::Union { .. } | PlanNode::SemiJoinFetch { .. } | PlanNode::InlineData { .. } | PlanNode::Empty => None,
     }
 }
 
@@ -144,6 +203,20 @@ async fn execute_node(
             strategy,
             join_kind,
         } => {
+            // Guard: reject unbounded cross-DB cross joins
+            if *join_kind == JoinKind::Cross || matches!(condition, Expression::Boolean(true)) {
+                let left_db = find_single_db(left);
+                let right_db = find_single_db(right);
+                if let (Some((ln, _)), Some((rn, _))) = (&left_db, &right_db) {
+                    if ln != rn {
+                        return Err(RiverError::Unsupported(
+                            "Cross-database cross joins require a LIMIT clause to prevent \
+                             unbounded result sets. Add 'limit N' to your query."
+                                .into(),
+                        ));
+                    }
+                }
+            }
             let left_fut = Box::pin(execute_node(left, adapters));
             let right_fut = Box::pin(execute_node(right, adapters));
             let (lr, rr) = tokio::join!(left_fut, right_fut);
@@ -181,11 +254,28 @@ async fn execute_node(
             let (lr, rr) = tokio::join!(lf, rf);
             union_results(lr?, rr?, *all)
         }
-        PlanNode::Empty => Ok(empty_result()),
-        PlanNode::Scan { .. } => {
+        PlanNode::InlineData { columns, rows } => Ok(QueryResult {
+            columns: columns.clone(),
+            rows: rows.clone(),
+            elapsed: std::time::Duration::default(),
+            rows_affected: rows.len() as u64,
+        }),
+        PlanNode::SemiJoinFetch { .. } => {
             Err(RiverError::Unsupported(
-                "no database configured — create a river.yaml file with connections".into(),
+                "SemiJoinFetch execution not yet implemented".into(),
             ))
+        }
+        PlanNode::Empty => Ok(empty_result()),
+        PlanNode::Scan { source, .. } => {
+            if let SourceKind::CteRef(_) = &source.kind {
+                Err(RiverError::Unsupported(
+                    format!("CTE \"{}\" was not resolved before execution", source.name),
+                ))
+            } else {
+                Err(RiverError::Unsupported(
+                    "no database configured — create a river.yaml file with connections".into(),
+                ))
+            }
         }
     }
 }
@@ -479,11 +569,15 @@ fn apply_projection(
                 let name = alias.clone().unwrap_or_else(|| match expr {
                     Expression::Ident(n) => n.clone(),
                     Expression::QualifiedIdent { field, .. } => field.clone(),
+                    Expression::Aggregate { .. } => agg_default_name(expr),
                     _ => "expr".to_string(),
                 });
                 let idx = match expr {
                     Expression::Ident(n) | Expression::QualifiedIdent { field: n, .. } => {
                         result.columns.iter().position(|c| c == n)
+                    }
+                    Expression::Aggregate { .. } => {
+                        result.columns.iter().position(|c| c == &name)
                     }
                     _ => None,
                 };
@@ -570,11 +664,161 @@ fn apply_limit(
 
 fn apply_aggregate(
     result: &QueryResult,
-    _group_by: &[Expression],
-    _aggs: &[Expression],
+    group_by: &[Expression],
+    aggs: &[(Expression, Option<String>)],
 ) -> Result<QueryResult, RiverError> {
-    // For now, pass-through — aggregates are pushed down to DB queries
-    Ok(result.clone())
+    if aggs.is_empty() && group_by.is_empty() {
+        return Ok(result.clone());
+    }
+
+    // Build output column names
+    let mut out_columns: Vec<String> = Vec::new();
+    for gb in group_by {
+        let name = match gb {
+            Expression::Ident(n) => n.clone(),
+            Expression::QualifiedIdent { field, .. } => field.clone(),
+            _ => "expr".to_string(),
+        };
+        out_columns.push(name);
+    }
+    for (agg_expr, alias) in aggs {
+        let name = alias.clone().unwrap_or_else(|| agg_default_name(agg_expr));
+        out_columns.push(name);
+    }
+
+    // Group rows by group-by key values
+    let mut groups: HashMap<Vec<Value>, Vec<Vec<Value>>> = HashMap::new();
+    let mut group_order: Vec<Vec<Value>> = Vec::new();
+
+    for row in &result.rows {
+        let key: Vec<Value> = group_by
+            .iter()
+            .map(|gb| eval_expr(gb, &result.columns, row))
+            .collect();
+        if !groups.contains_key(&key) {
+            group_order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(row.clone());
+    }
+
+    // Compute aggregates per group
+    let mut out_rows: Vec<Vec<Value>> = Vec::new();
+    for key in &group_order {
+        let group_rows = groups.get(key).unwrap();
+        let mut out_row: Vec<Value> = key.clone();
+        for (agg_expr, _) in aggs {
+            out_row.push(compute_aggregate(agg_expr, &result.columns, group_rows));
+        }
+        out_rows.push(out_row);
+    }
+
+    // Global aggregate (no group-by): produce a single row even if input is empty
+    if group_by.is_empty() && !aggs.is_empty() && out_rows.is_empty() {
+        let mut out_row: Vec<Value> = Vec::new();
+        for (agg_expr, _) in aggs {
+            out_row.push(compute_aggregate(agg_expr, &result.columns, &[]));
+        }
+        out_rows.push(out_row);
+    }
+
+    Ok(QueryResult {
+        columns: out_columns,
+        rows: out_rows,
+        elapsed: std::time::Duration::default(),
+        rows_affected: 0,
+    })
+}
+
+fn agg_default_name(expr: &Expression) -> String {
+    match expr {
+        Expression::Aggregate { name, args, .. } => {
+            if args.is_empty() {
+                format!("{}(*)", name)
+            } else if let Expression::Ident(col) = &args[0] {
+                format!("{}({})", name, col)
+            } else {
+                format!("{}(...)", name)
+            }
+        }
+        _ => "expr".to_string(),
+    }
+}
+
+fn compute_aggregate(expr: &Expression, columns: &[String], rows: &[Vec<Value>]) -> Value {
+    match expr {
+        Expression::Aggregate {
+            name,
+            distinct,
+            args,
+        } => {
+            let arg_values: Vec<Value> = if args.is_empty() {
+                rows.iter().map(|_| Value::Int(1)).collect()
+            } else {
+                rows.iter()
+                    .map(|r| eval_expr(&args[0], columns, r))
+                    .collect()
+            };
+
+            match name.as_str() {
+                "count" => {
+                    if *distinct {
+                        let mut seen = std::collections::HashSet::new();
+                        for v in &arg_values {
+                            seen.insert(v.clone());
+                        }
+                        Value::Int(seen.len() as i64)
+                    } else {
+                        Value::Int(arg_values.len() as i64)
+                    }
+                }
+                "count_distinct" => {
+                    let mut seen = std::collections::HashSet::new();
+                    for v in &arg_values {
+                        seen.insert(v.clone());
+                    }
+                    Value::Int(seen.len() as i64)
+                }
+                "sum" => {
+                    let vals: Vec<f64> = arg_values.iter().filter_map(to_f64).collect();
+                    if vals.is_empty() {
+                        Value::Null
+                    } else if arg_values.iter().all(|v| matches!(v, Value::Int(_))) {
+                        Value::Int(vals.iter().sum::<f64>() as i64)
+                    } else {
+                        Value::Float(vals.iter().sum())
+                    }
+                }
+                "avg" => {
+                    let vals: Vec<f64> = arg_values.iter().filter_map(to_f64).collect();
+                    if vals.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::Float(vals.iter().sum::<f64>() / vals.len() as f64)
+                    }
+                }
+                "min" => arg_values
+                    .iter()
+                    .min_by(|a, b| cmp_values(a, b))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "max" => arg_values
+                    .iter()
+                    .max_by(|a, b| cmp_values(a, b))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                _ => Value::Null,
+            }
+        }
+        _ => Value::Null,
+    }
+}
+
+fn to_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Int(i) => Some(*i as f64),
+        Value::Float(f) => Some(*f),
+        _ => None,
+    }
 }
 
 fn apply_distinct(result: &QueryResult) -> Result<QueryResult, RiverError> {
@@ -1462,5 +1706,165 @@ mod tests {
         };
         let sql = translate_for_kind(&q, &crate::connection::DatabaseKind::MySQL);
         assert_eq!(sql, "SELECT * FROM `users`");
+    }
+
+    // ── Chained CTE with in-memory aggregation ────────────────────────
+
+    use crate::adapters::{DatabaseAdapter, QueryResult, TableInfo, TableSchema};
+    use crate::connection::{ConnectionConfig, DatabaseKind};
+    use crate::lang::parse;
+    use async_trait::async_trait;
+
+    struct MockAdapter;
+
+    #[async_trait]
+    impl DatabaseAdapter for MockAdapter {
+        async fn connect(_config: &ConnectionConfig) -> Result<Self, RiverError> {
+            Ok(MockAdapter)
+        }
+
+        async fn execute(&self, query: &str) -> Result<QueryResult, RiverError> {
+            if query.contains("orders") {
+                Ok(QueryResult {
+                    columns: vec![
+                        "id".into(),
+                        "user_id".into(),
+                        "total".into(),
+                        "status".into(),
+                    ],
+                    rows: vec![
+                        vec![Value::Int(1), Value::Int(1), Value::Int(500), Value::String("paid".into())],
+                        vec![Value::Int(2), Value::Int(1), Value::Int(600), Value::String("paid".into())],
+                        vec![Value::Int(3), Value::Int(2), Value::Int(200), Value::String("paid".into())],
+                        vec![Value::Int(4), Value::Int(3), Value::Int(1500), Value::String("paid".into())],
+                        vec![Value::Int(5), Value::Int(3), Value::Int(300), Value::String("paid".into())],
+                    ],
+                    elapsed: std::time::Duration::default(),
+                    rows_affected: 0,
+                })
+            } else if query.contains("users") {
+                Ok(QueryResult {
+                    columns: vec!["id".into(), "name".into()],
+                    rows: vec![
+                        vec![Value::Int(1), Value::String("Alice".into())],
+                        vec![Value::Int(2), Value::String("Bob".into())],
+                        vec![Value::Int(3), Value::String("Carol".into())],
+                    ],
+                    elapsed: std::time::Duration::default(),
+                    rows_affected: 0,
+                })
+            } else {
+                Ok(QueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                    elapsed: std::time::Duration::default(),
+                    rows_affected: 0,
+                })
+            }
+        }
+
+        async fn list_tables(&self) -> Result<Vec<TableInfo>, RiverError> {
+            Ok(vec![])
+        }
+        async fn describe_table(&self, _table: &str) -> Result<TableSchema, RiverError> {
+            Ok(TableSchema {
+                name: "mock".into(),
+                columns: vec![],
+            })
+        }
+        fn dialect(&self) -> DatabaseKind {
+            DatabaseKind::SQLite
+        }
+    }
+
+    #[tokio::test]
+    async fn chained_cte_with_in_memory_aggregation() {
+        let mut adapters: HashMap<String, Box<dyn DatabaseAdapter>> = HashMap::new();
+        adapters.insert("test".into(), Box::new(MockAdapter));
+        let source_db = vec![("test".into(), DatabaseKind::SQLite)];
+
+        let query = r#"with
+  paid_orders as ( find * from orders where status = "paid" ),
+  user_totals as ( find [user_id, sum(total) as revenue] from paid_orders group by user_id )
+find [u.name, ut.revenue]
+from users as u
+join user_totals as ut on u.id = ut.user_id
+where ut.revenue > 1000
+order by ut.revenue desc"#;
+
+        let stmt = parse(query).expect("parse failed");
+        let result = execute_statement(&stmt, &source_db, &adapters)
+            .await
+            .expect("execution failed");
+
+        assert_eq!(result.columns, vec!["name", "revenue"]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0][0], Value::String("Carol".into()));
+        assert_eq!(result.rows[0][1], Value::Int(1800));
+        assert_eq!(result.rows[1][0], Value::String("Alice".into()));
+        assert_eq!(result.rows[1][1], Value::Int(1100));
+    }
+
+    #[tokio::test]
+    async fn single_cte_resolution() {
+        let mut adapters: HashMap<String, Box<dyn DatabaseAdapter>> = HashMap::new();
+        adapters.insert("test".into(), Box::new(MockAdapter));
+        let source_db = vec![("test".into(), DatabaseKind::SQLite)];
+
+        let query = r#"with paid_orders as ( find * from orders where status = "paid" ) find [id, total] from paid_orders"#;
+
+        let stmt = parse(query).expect("parse failed");
+        let result = execute_statement(&stmt, &source_db, &adapters)
+            .await
+            .expect("execution failed");
+
+        assert_eq!(result.columns, vec!["id", "total"]);
+        assert_eq!(result.rows.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn in_memory_aggregate_sum() {
+        let mut adapters: HashMap<String, Box<dyn DatabaseAdapter>> = HashMap::new();
+        adapters.insert("test".into(), Box::new(MockAdapter));
+        let source_db = vec![("test".into(), DatabaseKind::SQLite)];
+
+        let query = r#"with all_orders as ( find * from orders ) find [user_id, sum(total) as revenue] from all_orders group by user_id"#;
+
+        let stmt = parse(query).expect("parse failed");
+        let result = execute_statement(&stmt, &source_db, &adapters)
+            .await
+            .expect("execution failed");
+
+        assert_eq!(result.columns, vec!["user_id", "revenue"]);
+        assert_eq!(result.rows.len(), 3);
+        let by_user: HashMap<i64, i64> = result
+            .rows
+            .iter()
+            .map(|r| match (&r[0], &r[1]) {
+                (Value::Int(u), Value::Int(v)) => (*u, *v),
+                _ => panic!("expected int values, got {:?}", r),
+            })
+            .collect();
+        assert_eq!(by_user.get(&1), Some(&1100));
+        assert_eq!(by_user.get(&2), Some(&200));
+        assert_eq!(by_user.get(&3), Some(&1800));
+    }
+
+    #[tokio::test]
+    async fn in_memory_aggregate_count() {
+        let mut adapters: HashMap<String, Box<dyn DatabaseAdapter>> = HashMap::new();
+        adapters.insert("test".into(), Box::new(MockAdapter));
+        let source_db = vec![("test".into(), DatabaseKind::SQLite)];
+
+        let query = r#"with all_orders as ( find * from orders ) find [count(*) as cnt] from all_orders"#;
+
+        let stmt = parse(query).expect("parse failed");
+        let result = execute_statement(&stmt, &source_db, &adapters)
+            .await
+            .expect("execution failed");
+
+        assert_eq!(result.columns, vec!["cnt"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::Int(5));
     }
 }
