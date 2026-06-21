@@ -15,9 +15,26 @@ pub async fn execute_plan(
     adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
 ) -> Result<QueryResult, RiverError> {
     let start = Instant::now();
-    let mut result = execute_node(&plan.root, adapters).await?;
+    let has_limit = plan_has_limit(&plan.root);
+    let mut result = execute_node(&plan.root, adapters, has_limit).await?;
     result.elapsed = start.elapsed();
     Ok(result)
+}
+
+/// Returns true if a Limit node exists anywhere in the plan tree
+fn plan_has_limit(node: &PlanNode) -> bool {
+    match node {
+        PlanNode::Limit { .. } => true,
+        PlanNode::Filter { input, .. }
+        | PlanNode::Project { input, .. }
+        | PlanNode::Order { input, .. }
+        | PlanNode::Aggregate { input, .. }
+        | PlanNode::Distinct { input, .. } => plan_has_limit(input),
+        PlanNode::Join { left, right, .. }
+        | PlanNode::Union { left, right, .. } => plan_has_limit(left) || plan_has_limit(right),
+        PlanNode::SemiJoinFetch { build, .. } => plan_has_limit(build),
+        PlanNode::Scan { .. } | PlanNode::InlineData { .. } | PlanNode::Empty => false,
+    }
 }
 
 pub async fn execute_statement(
@@ -190,6 +207,7 @@ fn collect_single_db_query(node: &PlanNode) -> Option<(String, DatabaseKind, Que
 async fn execute_node(
     node: &PlanNode,
     adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
+    bounded: bool,
 ) -> Result<QueryResult, RiverError> {
     if let Some((db_name, db_kind, query)) = collect_single_db_query(node) {
         return execute_on_db(&db_name, &db_kind, &query, adapters).await;
@@ -203,8 +221,11 @@ async fn execute_node(
             strategy,
             join_kind,
         } => {
-            // Guard: reject unbounded cross-DB cross joins
-            if *join_kind == JoinKind::Cross || matches!(condition, Expression::Boolean(true)) {
+            // Guard: reject unbounded cross-DB cross joins (unless a LIMIT exists in the plan)
+            if !bounded
+                && (*join_kind == JoinKind::Cross
+                    || matches!(condition, Expression::Boolean(true)))
+            {
                 let left_db = find_single_db(left);
                 let right_db = find_single_db(right);
                 if let (Some((ln, _)), Some((rn, _))) = (&left_db, &right_db) {
@@ -217,40 +238,40 @@ async fn execute_node(
                     }
                 }
             }
-            let left_fut = Box::pin(execute_node(left, adapters));
-            let right_fut = Box::pin(execute_node(right, adapters));
+            let left_fut = Box::pin(execute_node(left, adapters, bounded));
+            let right_fut = Box::pin(execute_node(right, adapters, bounded));
             let (lr, rr) = tokio::join!(left_fut, right_fut);
             let left_result = lr?;
             let right_result = rr?;
             join_results(left_result, right_result, condition, strategy, *join_kind)
         }
         PlanNode::Filter { input, condition } => {
-            let result = Box::pin(execute_node(input, adapters)).await?;
+            let result = Box::pin(execute_node(input, adapters, bounded)).await?;
             apply_filter(&result, condition)
         }
         PlanNode::Project { input, fields } => {
-            let result = Box::pin(execute_node(input, adapters)).await?;
+            let result = Box::pin(execute_node(input, adapters, bounded)).await?;
             apply_projection(&result, fields)
         }
         PlanNode::Order { input, order_by } => {
-            let result = Box::pin(execute_node(input, adapters)).await?;
+            let result = Box::pin(execute_node(input, adapters, bounded)).await?;
             apply_order(&result, order_by)
         }
         PlanNode::Limit { input, limit, offset } => {
-            let result = Box::pin(execute_node(input, adapters)).await?;
+            let result = Box::pin(execute_node(input, adapters, true)).await?;
             apply_limit(&result, *limit, *offset)
         }
         PlanNode::Aggregate { input, group_by, aggs } => {
-            let result = Box::pin(execute_node(input, adapters)).await?;
+            let result = Box::pin(execute_node(input, adapters, bounded)).await?;
             apply_aggregate(&result, group_by, aggs)
         }
         PlanNode::Distinct { input } => {
-            let result = Box::pin(execute_node(input, adapters)).await?;
+            let result = Box::pin(execute_node(input, adapters, bounded)).await?;
             apply_distinct(&result)
         }
         PlanNode::Union { left, right, all } => {
-            let lf = Box::pin(execute_node(left, adapters));
-            let rf = Box::pin(execute_node(right, adapters));
+            let lf = Box::pin(execute_node(left, adapters, bounded));
+            let rf = Box::pin(execute_node(right, adapters, bounded));
             let (lr, rr) = tokio::join!(lf, rf);
             union_results(lr?, rr?, *all)
         }
@@ -302,7 +323,7 @@ async fn execute_semi_join_fetch(
     use crate::engine::planner::CROSS_DB_BATCH_SIZE;
 
     // 1. Execute the build side
-    let build_result = Box::pin(execute_node(build, adapters)).await?;
+    let build_result = Box::pin(execute_node(build, adapters, false)).await?;
 
     if build_result.rows.is_empty() {
         return Ok(empty_result());
@@ -1992,5 +2013,75 @@ order by ut.revenue desc"#;
         assert_eq!(result.columns, vec!["cnt"]);
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::Int(5));
+    }
+
+    #[tokio::test]
+    async fn cross_db_cross_join_without_limit_rejected() {
+        let mut adapters: HashMap<String, Box<dyn DatabaseAdapter>> = HashMap::new();
+        adapters.insert("pg".into(), Box::new(MockAdapter));
+        adapters.insert("mysql".into(), Box::new(MockAdapter));
+        let source_db = vec![
+            ("pg".into(), DatabaseKind::Postgres),
+            ("mysql".into(), DatabaseKind::MySQL),
+        ];
+
+        let query =
+            r#"find [u.name, o.total] from users@pg as u cross join orders@mysql as o"#;
+        let stmt = parse(query).expect("parse failed");
+        let result = execute_statement(&stmt, &source_db, &adapters).await;
+        assert!(
+            result.is_err(),
+            "Expected error for unbounded cross-DB cross join"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("LIMIT") || err_msg.contains("limit"),
+            "Expected error about LIMIT, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_db_cross_join_with_limit_allowed() {
+        let mut adapters: HashMap<String, Box<dyn DatabaseAdapter>> = HashMap::new();
+        adapters.insert("pg".into(), Box::new(MockAdapter));
+        adapters.insert("mysql".into(), Box::new(MockAdapter));
+        let source_db = vec![
+            ("pg".into(), DatabaseKind::Postgres),
+            ("mysql".into(), DatabaseKind::MySQL),
+        ];
+
+        let query =
+            r#"find [u.name, o.total] from users@pg as u cross join orders@mysql as o limit 5"#;
+        let stmt = parse(query).expect("parse failed");
+        let result = execute_statement(&stmt, &source_db, &adapters).await;
+        assert!(
+            result.is_ok(),
+            "cross-DB cross join with LIMIT should work: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn semi_join_fetch_equi_join_cross_db() {
+        let mut adapters: HashMap<String, Box<dyn DatabaseAdapter>> = HashMap::new();
+        adapters.insert("pg".into(), Box::new(MockAdapter));
+        adapters.insert("mysql".into(), Box::new(MockAdapter));
+        let source_db = vec![
+            ("pg".into(), DatabaseKind::Postgres),
+            ("mysql".into(), DatabaseKind::MySQL),
+        ];
+
+        let query =
+            r#"find [u.name, o.total] from users@pg as u join orders@mysql as o on u.id = o.user_id"#;
+        let stmt = parse(query).expect("parse failed");
+        let result = execute_statement(&stmt, &source_db, &adapters).await;
+        assert!(
+            result.is_ok(),
+            "SemiJoinFetch should execute successfully: {:?}",
+            result.err()
+        );
+        let qr = result.unwrap();
+        assert!(!qr.rows.is_empty(), "Should have join results");
     }
 }
