@@ -1,0 +1,19 @@
+- name: pg
+  kind: postgres
+  uri: "postgres://river:river@localhost:5440/river"
+
+- name: mysql
+  kind: mysql
+  uri: "mysql://river:river@localhost:3307/river"
+
+# - name: mssql
+#   kind: mssql
+#   uri: "server=tcp:localhost,1433;database=master;trustservercertificate=true;user id=sa;password=RiverPass123!"
+
+- name: mongo
+  kind: mongodb
+  uri: "mongodb://localhost:27017/river"
+
+- name: sqlite
+  kind: sqlite
+  uri: "sqlite:river.db?mode=rwc"
