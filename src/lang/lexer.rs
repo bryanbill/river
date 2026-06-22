@@ -51,9 +51,18 @@ pub enum Token {
     True,
     False,
     Create,
+    Table,
     Update,
     Set,
     Remove,
+    Insert,
+    If,
+    Conflict,
+    Ignore,
+    Replace,
+    Primary,
+    Key,
+    Default_,
     Explain,
     Describe,
     Show,
@@ -220,9 +229,18 @@ impl fmt::Display for Token {
             Token::True => write!(f, "true"),
             Token::False => write!(f, "false"),
             Token::Create => write!(f, "create"),
+            Token::Table => write!(f, "table"),
             Token::Update => write!(f, "update"),
             Token::Set => write!(f, "set"),
             Token::Remove => write!(f, "remove"),
+            Token::Insert => write!(f, "insert"),
+            Token::If => write!(f, "if"),
+            Token::Conflict => write!(f, "conflict"),
+            Token::Ignore => write!(f, "ignore"),
+            Token::Replace => write!(f, "replace"),
+            Token::Primary => write!(f, "primary"),
+            Token::Key => write!(f, "key"),
+            Token::Default_ => write!(f, "default"),
             Token::Explain => write!(f, "explain"),
             Token::Describe => write!(f, "describe"),
             Token::Show => write!(f, "show"),
@@ -267,7 +285,7 @@ impl fmt::Display for Token {
             Token::Concat => write!(f, "||"),
             Token::CastOp => write!(f, "::"),
             Token::At => write!(f, "@"),
-            Token::Arrow => write!(f, "=>"),
+            Token::Arrow => write!(f, ">>"),
             Token::Ident(s) => write!(f, "{}", s),
             Token::StringLit(s) => write!(f, "\"{}\"", s),
             Token::Integer(n) => write!(f, "{}", n),
@@ -499,9 +517,18 @@ impl<'a> Lexer<'a> {
             "true" => Spanned::new(Token::True, start..end),
             "false" => Spanned::new(Token::False, start..end),
             "create" => Spanned::new(Token::Create, start..end),
+            "table" => Spanned::new(Token::Table, start..end),
             "update" => Spanned::new(Token::Update, start..end),
             "set" => Spanned::new(Token::Set, start..end),
             "remove" => Spanned::new(Token::Remove, start..end),
+            "insert" => Spanned::new(Token::Insert, start..end),
+            "if" => Spanned::new(Token::If, start..end),
+            "conflict" => Spanned::new(Token::Conflict, start..end),
+            "ignore" => Spanned::new(Token::Ignore, start..end),
+            "replace" => Spanned::new(Token::Replace, start..end),
+            "primary" => Spanned::new(Token::Primary, start..end),
+            "key" => Spanned::new(Token::Key, start..end),
+            "default" => Spanned::new(Token::Default_, start..end),
             "explain" => Spanned::new(Token::Explain, start..end),
             "describe" => Spanned::new(Token::Describe, start..end),
             "show" => Spanned::new(Token::Show, start..end),
@@ -613,12 +640,7 @@ impl<'a> Lexer<'a> {
                 }
                 '=' => {
                     self.advance();
-                    if self.peek() == Some('>') {
-                        self.advance();
-                        tokens.push(Spanned::new(Token::Arrow, start..self.pos));
-                    } else {
-                        tokens.push(Spanned::new(Token::Eq, start..self.pos));
-                    }
+                    tokens.push(Spanned::new(Token::Eq, start..self.pos));
                 }
                 '!' => {
                     self.advance();
@@ -644,7 +666,10 @@ impl<'a> Lexer<'a> {
                 }
                 '>' => {
                     self.advance();
-                    if self.peek() == Some('=') {
+                    if self.peek() == Some('>') {
+                        self.advance();
+                        tokens.push(Spanned::new(Token::Arrow, start..self.pos));
+                    } else if self.peek() == Some('=') {
                         self.advance();
                         tokens.push(Spanned::new(Token::Gte, start..self.pos));
                     } else {

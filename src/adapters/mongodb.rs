@@ -108,7 +108,134 @@ impl DatabaseAdapter for MongoAdapter {
             .ok_or_else(|| RiverError::Unsupported("missing 'collection' field".into()))?;
 
         let db = self.client.database(db_name);
+
+        // CREATE COLLECTION mode: when "create" field is present
+        if parsed.get("create").is_some() {
+            db.create_collection(coll_name).await?;
+            return Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                elapsed: start.elapsed(),
+                rows_affected: 0,
+            });
+        }
+
         let collection = db.collection::<Document>(coll_name);
+
+        // Insert mode: when "documents" field is present
+        if let Some(documents) = parsed["documents"].as_array() {
+            let on_conflict = parsed["on_conflict"].as_str();
+            let bson_docs: Vec<Document> = documents
+                .iter()
+                .map(|d| mongodb::bson::to_document(d).unwrap_or_default())
+                .collect();
+
+            if bson_docs.is_empty() {
+                return Ok(QueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                    elapsed: start.elapsed(),
+                    rows_affected: 0,
+                });
+            }
+
+            match on_conflict {
+                Some("ignore") => {
+                    let result = collection.insert_many(bson_docs).ordered(false).await;
+                    match result {
+                        Ok(r) => {
+                            return Ok(QueryResult {
+                                columns: vec![],
+                                rows: vec![],
+                                elapsed: start.elapsed(),
+                                rows_affected: r.inserted_ids.len() as u64,
+                            });
+                        }
+                        Err(e) if e.to_string().contains("duplicate") => {
+                            return Ok(QueryResult {
+                                columns: vec![],
+                                rows: vec![],
+                                elapsed: start.elapsed(),
+                                rows_affected: 0,
+                            });
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                Some("replace") => {
+                    let mut replaced = 0u64;
+                    for doc in &bson_docs {
+                        let filter = if let Some(id) = doc.get("_id") {
+                            doc! { "_id": id.clone() }
+                        } else {
+                            doc.clone()
+                        };
+                        let r = collection
+                            .replace_one(filter, doc.clone())
+                            .upsert(true)
+                            .await?;
+                        replaced += r.modified_count.max(r.upserted_id.is_some() as u64);
+                    }
+                    return Ok(QueryResult {
+                        columns: vec![],
+                        rows: vec![],
+                        elapsed: start.elapsed(),
+                        rows_affected: replaced,
+                    });
+                }
+                _ => {
+                    let result = collection.insert_many(bson_docs).await?;
+                    return Ok(QueryResult {
+                        columns: vec![],
+                        rows: vec![],
+                        elapsed: start.elapsed(),
+                        rows_affected: result.inserted_ids.len() as u64,
+                    });
+                }
+            }
+        }
+
+        // Delete mode: when "delete" field is present
+        if let Some(filter) = parsed["delete"].as_object() {
+            let mut delete_filter = doc! {};
+            for (k, v) in filter {
+                let bson_v = mongodb::bson::to_bson(v).unwrap_or_default();
+                delete_filter.insert(k.clone(), bson_v);
+            }
+            let result = collection.delete_many(delete_filter).await?;
+            return Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                elapsed: start.elapsed(),
+                rows_affected: result.deleted_count,
+            });
+        }
+
+        // Update mode: when "update" field is present (with optional "filter")
+        if let Some(updates) = parsed["update"].as_object() {
+            let filter = match parsed["filter"].as_object() {
+                Some(f) => {
+                    let mut doc = doc! {};
+                    for (k, v) in f {
+                        doc.insert(k.clone(), mongodb::bson::to_bson(v).unwrap_or_default());
+                    }
+                    doc
+                }
+                None => doc! {},
+            };
+            let mut update_doc = doc! {};
+            for (k, v) in updates {
+                update_doc.insert(k.clone(), mongodb::bson::to_bson(v).unwrap_or_default());
+            }
+            let set_doc = doc! { "$set": update_doc };
+            let result = collection.update_many(filter, set_doc).await?;
+            return Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                elapsed: start.elapsed(),
+                rows_affected: result.modified_count,
+            });
+        }
 
         let pipeline = parsed["pipeline"].as_array().cloned().unwrap_or_default();
 

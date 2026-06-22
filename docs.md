@@ -1184,15 +1184,88 @@ where timestamp < now() - 30d
 
 Without `where`, all rows are deleted. Always use `where` unless you intend a full-table deletion.
 
+### CREATE TABLE
+
+Define and create a new table with column definitions:
+
+```sql
+create table products (
+  name string,
+  price float,
+  category string default "general",
+  created_at datetime
+)
+```
+
+With primary key and constraints:
+
+```sql
+create table users (
+  id int primary key,
+  name string not null,
+  email string not null,
+  status string default "active"
+)
+```
+
+On a specific connection:
+
+```sql
+create table archive.orders@pg (
+  id int,
+  total float,
+  created_at datetime
+)
+```
+
+With IF NOT EXISTS (idempotent):
+
+```sql
+create table if not exists cache (
+  key string primary key,
+  value json,
+  expires_at datetime
+)
+```
+
+### Persisting Query Results — `>>`
+
+Save the results of any query to a table using `>>`:
+
+```sql
+find * from users >> user_backup
+```
+
+With conflict handling:
+
+```sql
+find [user_id, sum(total) as revenue]
+from orders
+group by user_id
+>> user_revenue@pg
+insert if exists on conflict replace
+```
+
+Ignore duplicates:
+
+```sql
+find distinct [email] from new_signups
+>> verified_emails
+insert if exists on conflict ignore
+```
+
 ### Operations Reference
 
-| Operation          | RiverQL                           | SQL Equivalent                    |
-|--------------------|-----------------------------------|-----------------------------------|
-| Insert one         | `create table { ... }`            | `INSERT INTO table VALUES (...)`  |
-| Insert many        | `create table [ {...}, {...} ]`   | `INSERT INTO table VALUES (...)`  |
-| Insert from query  | `create table (find ...)`         | `INSERT INTO table SELECT ...`    |
-| Update             | `update table set ... where ...`  | `UPDATE table SET ... WHERE ...`  |
-| Delete             | `remove table where ...`           | `DELETE FROM table WHERE ...`     |
+| Operation               | RiverQL                                        | SQL Equivalent                    |
+|-------------------------|------------------------------------------------|-----------------------------------|
+| Create table            | `create table t (col type, ...)`               | `CREATE TABLE t (...)`            |
+| Insert one              | `create table { ... }`                         | `INSERT INTO table VALUES (...)`  |
+| Insert many             | `create table [ {...}, {...} ]`                | `INSERT INTO table VALUES (...)`  |
+| Insert from query       | `create table (find ...)`                      | `INSERT INTO table SELECT ...`    |
+| Persist query results   | `find ... >> target`                           | `CREATE TABLE AS ... + INSERT`    |
+| Persist with upsert     | `find ... >> target insert if exists on conflict replace` | `ON CONFLICT DO UPDATE` |
+| Update                  | `update table set ... where ...`               | `UPDATE table SET ... WHERE ...`  |
+| Delete                  | `remove table where ...`                       | `DELETE FROM table WHERE ...`     |
 
 ---
 
@@ -1335,7 +1408,11 @@ limit N offset M
 | `is null` / `is not null`                 | NULL tests               |
 | `and` / `or` / `not`                      | Logical operators        |
 | `over` / `partition by` / `window`        | Window functions         |
-| `create`                                  | INSERT                   |
+| `create`                                  | INSERT / CREATE TABLE    |
+| `table`                                   | CREATE TABLE syntax      |
+| `if` / `exists`                           | IF NOT EXISTS            |
+| `insert`                                  | Persist query (`>>`)     |
+| `conflict` / `ignore` / `replace`         | ON CONFLICT handling     |
 | `update` / `set`                          | UPDATE                   |
 | `remove`                                  | DELETE                   |
 | `explain`                                 | Show query plan          |
@@ -1352,6 +1429,7 @@ limit N offset M
 | `+`, `-`, `*`, `/`, `%` | Arithmetic        |
 | `\|\|`             | String concatenation  |
 | `::`               | Type cast             |
+| `>>`               | Persist query results  |
 | `@`                | Connection reference  |
 | `.`                | Schema/field separator |
 
@@ -1436,6 +1514,9 @@ avg(expr) over (...)
 ### Data Modification
 
 ```sql
+-- Create table with columns
+create table t (col1 type1, col2 type2 not null, ...)
+
 -- Insert one
 create table { col: value, ... }
 
@@ -1444,6 +1525,9 @@ create table [{ ... }, { ... }]
 
 -- Insert from query
 create table (find ...)
+
+-- Persist query results
+find ... >> target [insert if exists on conflict (ignore | replace)]
 
 -- Update
 update table set col = value where ...

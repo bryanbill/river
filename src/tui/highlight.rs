@@ -38,7 +38,9 @@ pub fn token_kind(token: &Token) -> TokenKind {
         | Token::Union | Token::All | Token::Intersect | Token::Except
         | Token::Exists | Token::In | Token::Not | Token::Between
         | Token::And | Token::Or | Token::Like | Token::ILike | Token::Is
-        | Token::Create | Token::Update | Token::Set | Token::Remove
+        | Token::Create | Token::Table | Token::Update | Token::Set | Token::Remove
+        | Token::Insert | Token::If | Token::Conflict | Token::Ignore | Token::Replace
+        | Token::Primary | Token::Key | Token::Default_
         | Token::Explain | Token::Describe | Token::Show | Token::Tables
         | Token::Over | Token::Partition | Token::Window => TokenKind::Keyword,
 

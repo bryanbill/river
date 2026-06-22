@@ -547,7 +547,7 @@ pub fn translate_query(query: &Query, dialect: &dyn SqlDialect) -> String {
     query_str
 }
 
-fn qualify_table(table: &str, schema: Option<&str>, dialect: &dyn SqlDialect) -> String {
+pub fn qualify_table(table: &str, schema: Option<&str>, dialect: &dyn SqlDialect) -> String {
     let table_ident = dialect.quote_ident(table);
     if let Some(s) = schema {
         format!("{}.{}", dialect.quote_ident(s), table_ident)
@@ -587,8 +587,59 @@ pub fn translate_statement_sql(stmt: &Statement, dialect: &dyn SqlDialect) -> St
         Statement::Insert(insert) => translate_insert_sql(insert, dialect),
         Statement::Update(update) => translate_update_sql(update, dialect),
         Statement::Delete(delete) => translate_delete_sql(delete, dialect),
+        Statement::CreateTable(ct) => translate_create_table(ct, dialect),
         Statement::Noop => String::new(),
         _ => format!("-- unsupported statement type"),
+    }
+}
+
+pub fn translate_create_table(ct: &CreateTable, dialect: &dyn SqlDialect) -> String {
+    let table_name = qualify_table(&ct.table, ct.schema.as_deref(), dialect);
+    let if_not_exists = if ct.if_not_exists { "IF NOT EXISTS " } else { "" };
+
+    let cols: Vec<String> = ct.columns.iter().map(|col| {
+        let mut def = format!(
+            "{} {}",
+            dialect.quote_ident(&col.name),
+            translate_data_type(&col.data_type, dialect)
+        );
+        if !col.nullable {
+            def.push_str(" NOT NULL");
+        }
+        if let Some(default) = &col.default {
+            def.push_str(&format!(" DEFAULT {}", translate_expr(default, dialect)));
+        }
+        def
+    }).collect();
+
+    let pks: Vec<&String> = ct.columns.iter()
+        .filter(|c| c.primary_key)
+        .map(|c| &c.name)
+        .collect();
+    let pk_clause = if !pks.is_empty() {
+        format!(
+            ", PRIMARY KEY ({})",
+            pks.iter().map(|n| dialect.quote_ident(n)).collect::<Vec<_>>().join(", ")
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        "CREATE TABLE {}{} ({}{})",
+        if_not_exists, table_name, cols.join(", "), pk_clause
+    )
+}
+
+pub fn translate_data_type(dt: &DataType, dialect: &dyn SqlDialect) -> String {
+    match (dt, dialect.kind()) {
+        (DataType::String, _) => "TEXT".into(),
+        (DataType::Integer, _) => "INTEGER".into(),
+        (DataType::Float, _) => "DOUBLE PRECISION".into(),
+        (DataType::Boolean, _) => "BOOLEAN".into(),
+        (DataType::DateTime, _) => "TIMESTAMP".into(),
+        (DataType::Json, DatabaseKind::Postgres) => "JSONB".into(),
+        (DataType::Json, _) => "JSON".into(),
     }
 }
 

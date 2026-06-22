@@ -1,7 +1,9 @@
+use super::planner::{plan_statement, translate_insert_mongo, PlanNode};
 use super::translator::{
-    MSSQLDialect, MySQLDialect, PostgresDialect, SqlDialect, translate_expr,
-    translate_query, translate_query_mongo, translate_statement_sql,
+    MSSQLDialect, MySQLDialect, PostgresDialect, SqlDialect, translate_data_type,
+    translate_expr, translate_query, translate_query_mongo, translate_statement_sql,
 };
+use crate::connection::DatabaseKind;
 use crate::lang::ast::*;
 
 fn make_query(projection: Vec<Projection>, sources: Vec<Source>, filter: Option<Expression>) -> Query {
@@ -778,4 +780,307 @@ fn translate_delete_with_schema() {
     };
     let sql = translate_statement_sql(&Statement::Delete(delete), &MSSQLDialect);
     assert_eq!(sql, "DELETE FROM [archive].[logs] WHERE ([id] = 42)");
+}
+
+// ── CREATE TABLE translator tests ──────────────────────────────────────────
+
+#[test]
+fn translate_create_table_postgres() {
+    let ct = CreateTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        columns: vec![
+            ColumnDef {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+                default: None,
+                primary_key: true,
+            },
+            ColumnDef {
+                name: "name".into(),
+                data_type: DataType::String,
+                nullable: false,
+                default: None,
+                primary_key: false,
+            },
+            ColumnDef {
+                name: "age".into(),
+                data_type: DataType::Integer,
+                nullable: true,
+                default: None,
+                primary_key: false,
+            },
+        ],
+        if_not_exists: false,
+    };
+    let sql = translate_statement_sql(&Statement::CreateTable(ct), &PostgresDialect);
+    assert_eq!(
+        sql,
+        r#"CREATE TABLE "users" ("id" INTEGER NOT NULL, "name" TEXT NOT NULL, "age" INTEGER, PRIMARY KEY ("id"))"#
+    );
+}
+
+#[test]
+fn translate_create_table_mysql() {
+    let ct = CreateTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        columns: vec![
+            ColumnDef {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+                default: None,
+                primary_key: true,
+            },
+        ],
+        if_not_exists: false,
+    };
+    let sql = translate_statement_sql(&Statement::CreateTable(ct), &MySQLDialect);
+    assert_eq!(
+        sql,
+        "CREATE TABLE `users` (`id` INTEGER NOT NULL, PRIMARY KEY (`id`))"
+    );
+}
+
+#[test]
+fn translate_create_table_if_not_exists() {
+    let ct = CreateTable {
+        table: "cache".into(),
+        connection: None,
+        schema: None,
+        columns: vec![ColumnDef {
+            name: "key".into(),
+            data_type: DataType::String,
+            nullable: false,
+            default: None,
+            primary_key: true,
+        }],
+        if_not_exists: true,
+    };
+    let sql = translate_statement_sql(&Statement::CreateTable(ct), &PostgresDialect);
+    assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS"));
+}
+
+#[test]
+fn translate_create_table_primary_key() {
+    let ct = CreateTable {
+        table: "t".into(),
+        connection: None,
+        schema: None,
+        columns: vec![
+            ColumnDef {
+                name: "a".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+                default: None,
+                primary_key: true,
+            },
+            ColumnDef {
+                name: "b".into(),
+                data_type: DataType::Integer,
+                nullable: false,
+                default: None,
+                primary_key: true,
+            },
+            ColumnDef {
+                name: "c".into(),
+                data_type: DataType::String,
+                nullable: true,
+                default: None,
+                primary_key: false,
+            },
+        ],
+        if_not_exists: false,
+    };
+    let sql = translate_statement_sql(&Statement::CreateTable(ct), &PostgresDialect);
+    assert!(sql.contains(r#"PRIMARY KEY ("a", "b")"#));
+}
+
+#[test]
+fn translate_data_types() {
+    assert_eq!(
+        translate_data_type(&DataType::Integer, &PostgresDialect),
+        "INTEGER"
+    );
+    assert_eq!(
+        translate_data_type(&DataType::String, &PostgresDialect),
+        "TEXT"
+    );
+    assert_eq!(
+        translate_data_type(&DataType::Float, &PostgresDialect),
+        "DOUBLE PRECISION"
+    );
+    assert_eq!(
+        translate_data_type(&DataType::Boolean, &PostgresDialect),
+        "BOOLEAN"
+    );
+    assert_eq!(
+        translate_data_type(&DataType::DateTime, &PostgresDialect),
+        "TIMESTAMP"
+    );
+    assert_eq!(
+        translate_data_type(&DataType::Json, &PostgresDialect),
+        "JSONB"
+    );
+    assert_eq!(
+        translate_data_type(&DataType::Json, &MySQLDialect),
+        "JSON"
+    );
+}
+
+#[test]
+fn translate_insert_with_conflict_ignore() {
+    let sql = build_insert_into_str("target", &["id".into(), "val".into()], Some(&ConflictAction::Ignore), &PostgresDialect);
+    assert!(sql.contains("ON CONFLICT DO NOTHING"));
+}
+
+#[test]
+fn translate_insert_with_conflict_replace() {
+    let sql = build_insert_into_str("target", &["id".into(), "val".into()], Some(&ConflictAction::Replace), &PostgresDialect);
+    assert!(sql.contains("ON CONFLICT"));
+    assert!(sql.contains("DO UPDATE SET"));
+}
+
+// Helper to test insert builder without real data
+fn build_insert_into_str(
+    table: &str, columns: &[String],
+    on_conflict: Option<&ConflictAction>, dialect: &dyn SqlDialect,
+) -> String {
+    let cols = columns.iter().map(|c| dialect.quote_ident(c)).collect::<Vec<_>>().join(", ");
+    let base = format!("INSERT INTO {} ({}) VALUES (1, 'x')", dialect.quote_ident(table), cols);
+    match on_conflict {
+        Some(ConflictAction::Ignore) => format!("{} ON CONFLICT DO NOTHING", base),
+        Some(ConflictAction::Replace) => format!(
+            "{} ON CONFLICT ({}) DO UPDATE SET {}",
+            base,
+            columns.iter().map(|c| dialect.quote_ident(c)).collect::<Vec<_>>().join(", "),
+            columns.iter().map(|c| format!("{} = EXCLUDED.{}", dialect.quote_ident(c), dialect.quote_ident(c))).collect::<Vec<_>>().join(", ")
+        ),
+        None => base,
+    }
+}
+
+#[test]
+fn plan_create_table_mongo_generates_json() {
+    let ct = CreateTable {
+        table: "logs".into(),
+        connection: Some("mongo".into()),
+        schema: None,
+        columns: vec![
+            ColumnDef {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: true,
+                default: None,
+                primary_key: false,
+            },
+        ],
+        if_not_exists: false,
+    };
+    let stmt = Statement::CreateTable(ct);
+    let source_db = vec![("mongo".to_string(), DatabaseKind::MongoDB)];
+    let plan = plan_statement(&stmt, &source_db);
+    match &plan.root {
+        PlanNode::CreateTable { sql, .. } => {
+            assert!(
+                sql.contains("\"create\""),
+                "Expected MongoDB create JSON, got: {}",
+                sql
+            );
+            assert!(
+                sql.contains("\"collection\""),
+                "Expected MongoDB JSON, got: {}",
+                sql
+            );
+            assert!(
+                sql.contains("\"create\""),
+                "Expected MongoDB JSON, got: {}",
+                sql
+            );
+        }
+        other => panic!("Expected CreateTable plan node, got: {:?}", other),
+    }
+}
+
+#[test]
+fn plan_create_table_postgres_generates_sql() {
+    let ct = CreateTable {
+        table: "logs".into(),
+        connection: Some("pg".into()),
+        schema: None,
+        columns: vec![
+            ColumnDef {
+                name: "id".into(),
+                data_type: DataType::Integer,
+                nullable: true,
+                default: None,
+                primary_key: false,
+            },
+        ],
+        if_not_exists: false,
+    };
+    let stmt = Statement::CreateTable(ct);
+    let source_db = vec![("pg".to_string(), DatabaseKind::Postgres)];
+    let plan = plan_statement(&stmt, &source_db);
+    match &plan.root {
+        PlanNode::CreateTable { sql, .. } => {
+            assert!(
+                sql.starts_with("CREATE TABLE"),
+                "Expected SQL, got: {}",
+                sql
+            );
+        }
+        other => panic!("Expected CreateTable plan node, got: {:?}", other),
+    }
+}
+
+#[test]
+fn plan_insert_mongo_generates_json() {
+    let insert = Insert {
+        table: "test_coll".into(),
+        connection: Some("mongo".into()),
+        schema: None,
+        columns: None,
+        rows: vec![vec![
+            ("name".into(), Expression::String("Alice".into())),
+            ("age".into(), Expression::Integer(30)),
+        ]],
+        query: None,
+    };
+    let json = translate_insert_mongo(&insert);
+    assert!(json.contains("\"database\""), "Missing database field: {}", json);
+    assert!(json.contains("\"collection\""), "Missing collection field: {}", json);
+    assert!(json.contains("\"documents\""), "Missing documents field: {}", json);
+    assert!(json.contains("\"Alice\""), "Missing Alice value: {}", json);
+    assert!(json.contains("30"), "Missing age value: {}", json);
+    eprintln!("MongoDB insert JSON: {}", json);
+}
+
+#[test]
+fn plan_insert_mongo_from_statement() {
+    let insert = Insert {
+        table: "test_coll".into(),
+        connection: Some("mongo".into()),
+        schema: None,
+        columns: None,
+        rows: vec![vec![
+            ("x".into(), Expression::Integer(42)),
+        ]],
+        query: None,
+    };
+    let stmt = Statement::Insert(insert);
+    let source_db = vec![("mongo".to_string(), DatabaseKind::MongoDB)];
+    let plan = plan_statement(&stmt, &source_db);
+    match &plan.root {
+        PlanNode::Dml { sql, database } => {
+            assert_eq!(database.1, DatabaseKind::MongoDB);
+            eprintln!("MongoDB DML SQL: {}", sql);
+            assert!(!sql.starts_with("INSERT"), "Expected JSON not SQL: {}", sql);
+        }
+        other => panic!("Expected Dml plan node, got: {:?}", other),
+    }
 }
