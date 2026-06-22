@@ -1056,11 +1056,12 @@ pub fn translate_in_list_mongo(column: &str, values: &[Value]) -> JsonValue {
 
 pub fn build_probe_query_sql(
     table: &str,
+    schema: Option<&str>,
     key_column: &str,
     values: &[Value],
     dialect: &dyn SqlDialect,
 ) -> String {
-    let table_quoted = dialect.quote_ident(table);
+    let table_quoted = qualify_table(table, schema, dialect);
     let in_clause = translate_in_list(key_column, values, dialect);
     format!("SELECT * FROM {} WHERE {}", table_quoted, in_clause)
 }
@@ -1139,14 +1140,14 @@ mod tests {
     #[test]
     fn build_probe_sql_postgres() {
         let values = vec![Value::Int(10), Value::Int(20)];
-        let sql = build_probe_query_sql("orders", "user_id", &values, &PostgresDialect);
+        let sql = build_probe_query_sql("orders", None, "user_id", &values, &PostgresDialect);
         assert_eq!(sql, r#"SELECT * FROM "orders" WHERE "user_id" IN (10, 20)"#);
     }
 
     #[test]
     fn build_probe_sql_mysql() {
         let values = vec![Value::Int(5)];
-        let sql = build_probe_query_sql("users", "id", &values, &MySQLDialect);
+        let sql = build_probe_query_sql("users", None, "id", &values, &MySQLDialect);
         assert_eq!(sql, "SELECT * FROM `users` WHERE `id` IN (5)");
     }
 

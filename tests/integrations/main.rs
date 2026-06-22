@@ -15,6 +15,7 @@ mod t06_advanced_queries;
 mod t07_cross_database;
 mod t08_data_modification;
 mod t09_meta_commands;
+mod t10_schema;
 
 #[path = "../common/mod.rs"]
 mod common;

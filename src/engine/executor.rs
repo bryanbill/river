@@ -473,6 +473,7 @@ async fn execute_semi_join_fetch(
         SourceKind::Table(t) => t.clone(),
         _ => probe_source.name.clone(),
     };
+    let schema = probe_source.schema.as_deref();
 
     let mut probe_rows: Vec<Vec<Value>> = Vec::new();
     let mut probe_columns: Vec<String> = Vec::new();
@@ -494,7 +495,7 @@ async fn execute_semi_join_fetch(
                     DatabaseKind::MongoDB => unreachable!(),
                 };
                 crate::engine::translator::build_probe_query_sql(
-                    &table_name, &probe_key_col, chunk, dialect.as_ref(),
+                    &table_name, schema, &probe_key_col, chunk, dialect.as_ref(),
                 )
             }
         };
