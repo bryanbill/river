@@ -132,14 +132,18 @@ impl DatabaseAdapter for MssqlAdapter {
         })
     }
 
-    async fn list_tables(&self) -> Result<Vec<TableInfo>, RiverError> {
+    async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<TableInfo>, RiverError> {
         let mut client = self.client.lock().await;
-        let stream = client.query(
+        let schema_filter = schema
+            .map(|s| format!(" AND TABLE_SCHEMA = '{}'", s.replace('\'', "''")))
+            .unwrap_or_default();
+        let query = format!(
             "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES \
-             WHERE TABLE_TYPE = 'BASE TABLE' \
+             WHERE TABLE_TYPE = 'BASE TABLE'{} \
              ORDER BY TABLE_SCHEMA, TABLE_NAME",
-            &[],
-        ).await?;
+            schema_filter
+        );
+        let stream = client.query(&query, &[]).await?;
 
         let row_stream = stream.into_row_stream();
         futures::pin_mut!(row_stream);
@@ -161,13 +165,17 @@ impl DatabaseAdapter for MssqlAdapter {
         Ok(tables)
     }
 
-    async fn describe_table(&self, table: &str) -> Result<TableSchema, RiverError> {
+    async fn describe_table(&self, table: &str, schema: Option<&str>) -> Result<TableSchema, RiverError> {
         let mut client = self.client.lock().await;
+        let schema_filter = schema
+            .map(|s| format!(" AND TABLE_SCHEMA = '{}'", s.replace('\'', "''")))
+            .unwrap_or_default();
         let query = format!(
             "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE \
              FROM INFORMATION_SCHEMA.COLUMNS \
-             WHERE TABLE_NAME = '{}' ORDER BY ORDINAL_POSITION",
-            table.replace('\'', "''")
+             WHERE TABLE_NAME = '{}'{} ORDER BY ORDINAL_POSITION",
+            table.replace('\'', "''"),
+            schema_filter
         );
         let stream = client.query(&query, &[]).await?;
 

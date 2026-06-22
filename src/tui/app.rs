@@ -64,7 +64,7 @@ impl App {
         let mut output = OutputBuffer::new(10_000);
 
         output.push(OutputLine::Info(
-            "River v0.1.0 — multi-source database CLI".into(),
+            "River v0.2.0 — Unified Database Access".into(),
         ));
 
         let connected: Vec<&str> = adapters.keys().map(|s| s.as_str()).collect();
@@ -453,7 +453,7 @@ async fn execute_describe(app: &mut App, desc: &crate::lang::ast::Describe) {
         }
     };
 
-    match adapter.describe_table(&desc.table).await {
+    match adapter.describe_table(&desc.table, desc.schema.as_deref()).await {
         Ok(schema) => {
             let headers = vec![
                 "Column".to_string(),
@@ -500,8 +500,7 @@ async fn execute_show_tables(app: &mut App, conn: &Option<String>) {
             // No specific DB — list from all connected adapters
             let mut all: Vec<String> = Vec::new();
             for (name, adapter) in &app.adapters {
-                match adapter.list_tables().await {
-                    Ok(tables) => {
+                match adapter.list_tables(None).await {                    Ok(tables) => {
                         for t in &tables {
                             let schema = t
                                 .schema
@@ -529,7 +528,7 @@ async fn execute_show_tables(app: &mut App, conn: &Option<String>) {
         }
     };
 
-    match adapter.list_tables().await {
+    match adapter.list_tables(None).await {
         Ok(tables) => {
             let rows: Vec<Vec<String>> = tables.iter().map(|t| vec![t.name.clone()]).collect();
             app.output.push(OutputLine::Table {

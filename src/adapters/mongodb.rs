@@ -168,7 +168,7 @@ impl DatabaseAdapter for MongoAdapter {
         })
     }
 
-    async fn list_tables(&self) -> Result<Vec<TableInfo>, RiverError> {
+    async fn list_tables(&self, _schema: Option<&str>) -> Result<Vec<TableInfo>, RiverError> {
         let db = self.client.database(&self.default_db);
         let names = db.list_collection_names().await?;
         Ok(names
@@ -177,7 +177,7 @@ impl DatabaseAdapter for MongoAdapter {
             .collect())
     }
 
-    async fn describe_table(&self, table: &str) -> Result<TableSchema, RiverError> {
+    async fn describe_table(&self, table: &str, _schema: Option<&str>) -> Result<TableSchema, RiverError> {
         let db = self.client.database(&self.default_db);
         let collection = db.collection::<Document>(table);
         let sample = collection.find_one(doc! {}).await?;

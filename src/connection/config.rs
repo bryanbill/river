@@ -17,4 +17,6 @@ pub struct ConnectionConfig {
     pub name: String,
     pub kind: DatabaseKind,
     pub uri: String,
+    #[serde(default)]
+    pub schema: Option<String>,
 }

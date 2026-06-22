@@ -547,9 +547,20 @@ pub fn translate_query(query: &Query, dialect: &dyn SqlDialect) -> String {
     query_str
 }
 
+fn qualify_table(table: &str, schema: Option<&str>, dialect: &dyn SqlDialect) -> String {
+    let table_ident = dialect.quote_ident(table);
+    if let Some(s) = schema {
+        format!("{}.{}", dialect.quote_ident(s), table_ident)
+    } else {
+        table_ident
+    }
+}
+
 fn translate_source_sql(source: &Source, dialect: &dyn SqlDialect) -> String {
     let name = match &source.kind {
-        SourceKind::Table(t) => dialect.quote_ident(t),
+        SourceKind::Table(t) => {
+            qualify_table(t, source.schema.as_deref(), dialect)
+        }
         SourceKind::Subquery(q) => format!("({})", translate_query(q, dialect)),
         SourceKind::CteRef(cte_name) => dialect.quote_ident(cte_name),
     };
@@ -582,7 +593,7 @@ pub fn translate_statement_sql(stmt: &Statement, dialect: &dyn SqlDialect) -> St
 }
 
 fn translate_insert_sql(insert: &Insert, dialect: &dyn SqlDialect) -> String {
-    let table = dialect.quote_ident(&insert.table);
+    let table = qualify_table(&insert.table, insert.schema.as_deref(), dialect);
 
     if let Some(query) = &insert.query {
         return format!("INSERT INTO {} {}", table, translate_query(query, dialect));
@@ -620,7 +631,7 @@ fn translate_insert_sql(insert: &Insert, dialect: &dyn SqlDialect) -> String {
 }
 
 fn translate_update_sql(update: &Update, dialect: &dyn SqlDialect) -> String {
-    let table = dialect.quote_ident(&update.table);
+    let table = qualify_table(&update.table, update.schema.as_deref(), dialect);
 
     let sets: Vec<String> = update
         .assignments
@@ -640,7 +651,7 @@ fn translate_update_sql(update: &Update, dialect: &dyn SqlDialect) -> String {
 }
 
 fn translate_delete_sql(delete: &Delete, dialect: &dyn SqlDialect) -> String {
-    let table = dialect.quote_ident(&delete.table);
+    let table = qualify_table(&delete.table, delete.schema.as_deref(), dialect);
     let mut query_str = format!("DELETE FROM {}", table);
 
     if let Some(filter) = &delete.filter {
