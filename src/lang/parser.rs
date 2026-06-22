@@ -93,6 +93,15 @@ fn ident_or_keyword() -> impl Parser<Spanned, String, Error = PErr> {
         Token::Min => Ok("min".to_string()),
         Token::Max => Ok("max".to_string()),
         Token::CountDistinct => Ok("count_distinct".to_string()),
+        Token::Table => Ok("table".to_string()),
+        Token::Insert => Ok("insert".to_string()),
+        Token::If => Ok("if".to_string()),
+        Token::Conflict => Ok("conflict".to_string()),
+        Token::Ignore => Ok("ignore".to_string()),
+        Token::Replace => Ok("replace".to_string()),
+        Token::Primary => Ok("primary".to_string()),
+        Token::Key => Ok("key".to_string()),
+        Token::Default_ => Ok("default".to_string()),
         _ => Err(Simple::custom(s, "expected identifier")),
     })
 }
@@ -977,6 +986,9 @@ fn resolve_cte_refs_in_statement(stmt: &mut Statement, cte_names: &std::collecti
             }
             resolve_cte_refs_in_statement(&mut w.body, cte_names);
         }
+        Statement::CreateTableAs(cta) => {
+            resolve_cte_refs_in_query(&mut cta.query, cte_names);
+        }
         Statement::Insert(i) => {
             if let Some(q) = &mut i.query {
                 resolve_cte_refs_in_query(q, cte_names);
@@ -1092,6 +1104,87 @@ pub fn parser() -> Parser_<Vec<Statement>> {
             .then(expr_p.clone())
             .map(|(name, value)| Statement::ParamAssign { name, value });
 
+        let column_def = ident_or_keyword()
+            .then(data_type())
+            .then(
+                tok(Token::Not)
+                    .ignore_then(tok(Token::Null))
+                    .or_not()
+                    .map(|n| n.is_none()),
+            )
+            .then(
+                tok(Token::Default_)
+                    .ignore_then(expr_p.clone())
+                    .or_not(),
+            )
+            .then(
+                tok(Token::Primary)
+                    .ignore_then(tok(Token::Key))
+                    .or_not()
+                    .map(|pk| pk.is_some()),
+            )
+            .map(|((((name, data_type), nullable), default), primary_key)| {
+                ColumnDef {
+                    name,
+                    data_type,
+                    nullable,
+                    default,
+                    primary_key,
+                }
+            });
+
+        let create_table = tok(Token::Create)
+            .ignore_then(tok(Token::Table))
+            .ignore_then(
+                tok(Token::If)
+                    .ignore_then(tok(Token::Not))
+                    .ignore_then(tok(Token::Exists))
+                    .or_not()
+                    .map(|ifn| ifn.is_some()),
+            )
+            .then(source_name())
+            .then(
+                column_def
+                    .separated_by(tok(Token::Comma))
+                    .allow_trailing()
+                    .delimited_by(tok(Token::LParen), tok(Token::RParen)),
+            )
+            .map(|((if_not_exists, (schema, table, conn)), columns)| {
+                Statement::CreateTable(CreateTable {
+                    table,
+                    connection: conn,
+                    schema,
+                    columns,
+                    if_not_exists,
+                })
+            });
+
+        let create_table_as = query_p
+            .clone()
+            .then_ignore(tok(Token::Arrow))
+            .then(source_name())
+            .then(
+                tok(Token::Insert)
+                    .ignore_then(tok(Token::If))
+                    .ignore_then(tok(Token::Exists))
+                    .ignore_then(tok(Token::On))
+                    .ignore_then(tok(Token::Conflict))
+                    .ignore_then(choice((
+                        tok(Token::Ignore).map(|_| ConflictAction::Ignore),
+                        tok(Token::Replace).map(|_| ConflictAction::Replace),
+                    )))
+                    .or_not(),
+            )
+            .map(|((query, (schema, table, conn)), on_conflict)| {
+                Statement::CreateTableAs(CreateTableAs {
+                    query: Box::new(query),
+                    table,
+                    connection: conn,
+                    schema,
+                    on_conflict,
+                })
+            });
+
         let insert = tok(Token::Create)
             .ignore_then(source_name())
             .then(choice((
@@ -1191,6 +1284,8 @@ pub fn parser() -> Parser_<Vec<Statement>> {
             });
 
         choice((
+            create_table.boxed(),
+            create_table_as.boxed(),
             query_or_setop.boxed(),
             with_stmt.boxed(),
             explain.boxed(),

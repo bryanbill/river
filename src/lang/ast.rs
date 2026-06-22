@@ -11,6 +11,8 @@ pub enum Statement {
     Explain(Box<Statement>),
     Describe(Describe),
     ShowTables(Option<String>),
+    CreateTable(CreateTable),
+    CreateTableAs(CreateTableAs),
     ParamAssign {
         name: String,
         value: Expression,
@@ -397,4 +399,37 @@ pub struct Describe {
     pub table: String,
     pub connection: Option<String>,
     pub schema: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnDef {
+    pub name: String,
+    pub data_type: DataType,
+    pub nullable: bool,
+    pub default: Option<Expression>,
+    pub primary_key: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateTable {
+    pub table: String,
+    pub connection: Option<String>,
+    pub schema: Option<String>,
+    pub columns: Vec<ColumnDef>,
+    pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConflictAction {
+    Ignore,
+    Replace,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateTableAs {
+    pub query: Box<Query>,
+    pub table: String,
+    pub connection: Option<String>,
+    pub schema: Option<String>,
+    pub on_conflict: Option<ConflictAction>,
 }

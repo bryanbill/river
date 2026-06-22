@@ -32,8 +32,16 @@ Data today lives everywhere — different servers, different architectures, diff
 
 ### Quick install (recommended)
 
+**Linux / macOS:**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bryanbill/river/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/bryanbill/river/main/install.ps1 | iex
 ```
 
 ### Manual install

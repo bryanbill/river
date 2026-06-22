@@ -16,6 +16,7 @@ mod t07_cross_database;
 mod t08_data_modification;
 mod t09_meta_commands;
 mod t10_schema;
+mod t11_create_table;
 
 #[path = "../common/mod.rs"]
 mod common;

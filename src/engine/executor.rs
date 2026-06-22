@@ -33,7 +33,8 @@ fn plan_has_limit(node: &PlanNode) -> bool {
         PlanNode::Join { left, right, .. }
         | PlanNode::Union { left, right, .. } => plan_has_limit(left) || plan_has_limit(right),
         PlanNode::SemiJoinFetch { build, .. } => plan_has_limit(build),
-        PlanNode::Scan { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } => false,
+        PlanNode::CreateTableAs { query_plan, .. } => plan_has_limit(query_plan),
+        PlanNode::Scan { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } => false,
     }
 }
 
@@ -101,6 +102,9 @@ fn replace_cte_scans(node: &mut PlanNode, cte_data: &HashMap<String, QueryResult
         PlanNode::SemiJoinFetch { build, .. } => {
             replace_cte_scans(build, cte_data);
         }
+        PlanNode::CreateTableAs { query_plan, .. } => {
+            replace_cte_scans(query_plan, cte_data);
+        }
         _ => {}
     }
 }
@@ -162,6 +166,8 @@ fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
         PlanNode::ListTables { database } => Some(database.clone()),
         PlanNode::DescribeTable { database, .. } => Some(database.clone()),
         PlanNode::Dml { database, .. } => Some(database.clone()),
+        PlanNode::CreateTable { database, .. } => Some(database.clone()),
+        PlanNode::CreateTableAs { database, .. } => Some(database.clone()),
         PlanNode::InlineData { .. } | PlanNode::Empty => None,
     }
 }
@@ -234,7 +240,7 @@ fn collect_single_db_query(node: &PlanNode) -> Option<(String, DatabaseKind, Que
             });
             Some((ldb_name, ldb_kind, q))
         }
-        PlanNode::Union { .. } | PlanNode::SemiJoinFetch { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } => None,
+        PlanNode::Union { .. } | PlanNode::SemiJoinFetch { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::CreateTableAs { .. } => None,
     }
 }
 
@@ -384,6 +390,89 @@ async fn execute_node(
                 RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
             })?;
             adapter.execute(sql).await
+        }
+        PlanNode::CreateTable { database, sql } => {
+            let adapter = adapters.get(&database.0).ok_or_else(|| {
+                RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
+            })?;
+            adapter.execute(sql).await
+        }
+        PlanNode::CreateTableAs {
+            query_plan,
+            database,
+            target_table,
+            target_schema,
+            on_conflict,
+        } => {
+            let query_result = Box::pin(execute_node(query_plan, adapters, bounded)).await?;
+
+            if query_result.rows.is_empty() {
+                return Ok(QueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                    elapsed: std::time::Duration::default(),
+                    rows_affected: 0,
+                });
+            }
+
+            let adapter = adapters.get(&database.0).ok_or_else(|| {
+                RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
+            })?;
+
+            if database.1 == DatabaseKind::MongoDB {
+                let docs: Vec<serde_json::Value> = query_result
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        let mut map = serde_json::Map::new();
+                        for (i, col) in query_result.columns.iter().enumerate() {
+                            let val = row.get(i).unwrap_or(&Value::Null);
+                            let jv = match val {
+                                Value::Null => serde_json::Value::Null,
+                                Value::Int(n) => serde_json::json!(*n),
+                                Value::Float(f) => serde_json::json!(*f),
+                                Value::Bool(b) => serde_json::json!(*b),
+                                Value::String(s) => serde_json::json!(s),
+                            };
+                            map.insert(col.clone(), jv);
+                        }
+                        serde_json::Value::Object(map)
+                    })
+                    .collect();
+
+                let mut payload = serde_json::Map::new();
+                payload.insert("database".into(), serde_json::json!(""));
+                payload.insert("collection".into(), serde_json::json!(target_table.clone()));
+                payload.insert("documents".into(), serde_json::json!(docs));
+                if let Some(action) = on_conflict {
+                    let action_str = match action {
+                        ConflictAction::Ignore => "ignore",
+                        ConflictAction::Replace => "replace",
+                    };
+                    payload.insert("on_conflict".into(), serde_json::json!(action_str));
+                }
+                let json = serde_json::to_string(&payload).unwrap_or_default();
+                adapter.execute(&json).await
+            } else {
+                let column_types =
+                    infer_types_from_rows(&query_result.rows, query_result.columns.len());
+                let dialect: Box<dyn crate::engine::translator::SqlDialect> =
+                    crate::engine::translator::dialect_for(&database.1);
+                let table_name = crate::engine::translator::qualify_table(
+                    target_table, target_schema.as_deref(), dialect.as_ref(),
+                );
+
+                let create_sql = build_create_table_if_not_exists(
+                    &table_name, &query_result.columns, &column_types, dialect.as_ref(),
+                );
+                adapter.execute(&create_sql).await?;
+
+                let insert_sql = build_insert_into(
+                    &table_name, &query_result.columns, &query_result.rows,
+                    on_conflict.as_ref(), dialect.as_ref(),
+                );
+                adapter.execute(&insert_sql).await
+            }
         }
         PlanNode::Empty => Ok(empty_result()),
         PlanNode::Scan { source, .. } => {
@@ -1326,6 +1415,89 @@ fn merge_vals(left: &[Value], right: &[Value]) -> Vec<Value> {
     let mut vals = left.to_vec();
     vals.extend(right.iter().cloned());
     vals
+}
+
+fn infer_types_from_rows(rows: &[Vec<Value>], num_cols: usize) -> Vec<DataType> {
+    let mut types: Vec<Option<DataType>> = vec![None; num_cols];
+    for row in rows {
+        for (i, val) in row.iter().enumerate() {
+            let inferred = match val {
+                Value::Null => continue,
+                Value::Int(_) => DataType::Integer,
+                Value::Float(_) => DataType::Float,
+                Value::Bool(_) => DataType::Boolean,
+                Value::String(_) => DataType::String,
+            };
+            types[i] = Some(match &types[i] {
+                Some(current) => widen_type(current, &inferred),
+                None => inferred,
+            });
+        }
+    }
+    types.into_iter().map(|t| t.unwrap_or(DataType::String)).collect()
+}
+
+fn widen_type(current: &DataType, new: &DataType) -> DataType {
+    fn rank(dt: &DataType) -> i32 {
+        match dt {
+            DataType::Boolean => 0,
+            DataType::Integer => 1,
+            DataType::Float => 2,
+            DataType::String => 3,
+            DataType::DateTime => 4,
+            DataType::Json => 5,
+        }
+    }
+    if rank(new) > rank(current) { new.clone() } else { current.clone() }
+}
+
+fn build_create_table_if_not_exists(
+    table: &str, columns: &[String], types: &[DataType], dialect: &dyn crate::engine::translator::SqlDialect,
+) -> String {
+    let cols: Vec<String> = columns.iter().enumerate().map(|(i, col)| {
+        let dt = types.get(i).unwrap_or(&DataType::String);
+        format!("{} {}", dialect.quote_ident(col), translate_data_type(dt, dialect))
+    }).collect();
+    format!("CREATE TABLE IF NOT EXISTS {} ({})", table, cols.join(", "))
+}
+
+fn build_insert_into(
+    table: &str, columns: &[String], rows: &[Vec<Value>],
+    on_conflict: Option<&ConflictAction>, dialect: &dyn crate::engine::translator::SqlDialect,
+) -> String {
+    let cols = columns.iter().map(|c| dialect.quote_ident(c)).collect::<Vec<_>>().join(", ");
+    let values = rows.iter().map(|row| {
+        let vals: Vec<String> = row.iter().map(|v| value_to_sql_literal(v, dialect)).collect();
+        format!("({})", vals.join(", "))
+    }).collect::<Vec<_>>().join(", ");
+
+    let base = format!("INSERT INTO {} ({}) VALUES {}", table, cols, values);
+
+    match on_conflict {
+        Some(ConflictAction::Ignore) => {
+            format!("{} ON CONFLICT DO NOTHING", base)
+        }
+        Some(ConflictAction::Replace) => {
+            format!(
+                "{} ON CONFLICT ({}) DO UPDATE SET {}",
+                base,
+                columns.iter().map(|c| dialect.quote_ident(c)).collect::<Vec<_>>().join(", "),
+                columns.iter().map(|c| format!("{} = EXCLUDED.{}", dialect.quote_ident(c), dialect.quote_ident(c))).collect::<Vec<_>>().join(", ")
+            )
+        }
+        None => base,
+    }
+}
+
+fn value_to_sql_literal(v: &Value, _dialect: &dyn crate::engine::translator::SqlDialect) -> String {
+    match v {
+        Value::Null => "NULL".to_string(),
+        Value::Int(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Bool(true) => "TRUE".to_string(),
+        Value::Bool(false) => "FALSE".to_string(),
+        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+    }
 }
 
 #[cfg(test)]

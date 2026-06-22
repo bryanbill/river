@@ -718,3 +718,177 @@ fn multiple_ctes_compact() {
         }
     }
 }
+
+// ── CREATE TABLE tests ─────────────────────────────────────────────────────
+
+#[test]
+fn lex_double_gt_arrow() {
+    let tokens = lex_tokens("find * from users >> target");
+    let arrow = tokens.iter().find(|(t, _)| matches!(t, Token::Arrow));
+    assert!(arrow.is_some(), "expected Arrow token for >>");
+}
+
+#[test]
+fn lex_create_table_keywords() {
+    let tokens = lex_tokens("create table if not exists t (col int) insert if exists on conflict ignore replace");
+    let kinds: Vec<&Token> = tokens.iter().map(|(t, _)| t).collect();
+    assert!(kinds.contains(&&Token::Create));
+    assert!(kinds.contains(&&Token::Table));
+    assert!(kinds.contains(&&Token::If));
+    assert!(kinds.contains(&&Token::Exists));
+    assert!(kinds.contains(&&Token::Insert));
+    assert!(kinds.contains(&&Token::Conflict));
+    assert!(kinds.contains(&&Token::Ignore));
+    assert!(kinds.contains(&&Token::Replace));
+}
+
+#[test]
+fn parse_create_table_simple() {
+    let result = parse_one("create table users (name string, email string, age int)");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.table, "users");
+            assert_eq!(ct.columns.len(), 3);
+            assert_eq!(ct.columns[0].name, "name");
+            assert!(matches!(ct.columns[0].data_type, DataType::String));
+            assert_eq!(ct.columns[1].name, "email");
+            assert!(matches!(ct.columns[1].data_type, DataType::String));
+            assert_eq!(ct.columns[2].name, "age");
+            assert!(matches!(ct.columns[2].data_type, DataType::Integer));
+        }
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_if_not_exists() {
+    let result = parse_one("create table if not exists users (id int)");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateTable(ct) => {
+            assert!(ct.if_not_exists);
+        }
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_not_null_default() {
+    let result = parse_one("create table users (name string not null default \"anon\", age int)");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.columns.len(), 2);
+            assert!(!ct.columns[0].nullable);
+            assert!(ct.columns[0].default.is_some());
+            assert!(ct.columns[1].nullable);
+            assert!(ct.columns[1].default.is_none());
+        }
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_primary_key() {
+    let result = parse_one("create table users (id int primary key, name string)");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateTable(ct) => {
+            assert!(ct.columns[0].primary_key);
+            assert!(!ct.columns[1].primary_key);
+        }
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_at_connection() {
+    let result = parse_one("create table users@pg (name string)");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.connection.as_deref(), Some("pg"));
+        }
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_with_schema() {
+    let result = parse_one("create table public.users (name string)");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.schema.as_deref(), Some("public"));
+            assert_eq!(ct.table, "users");
+        }
+        other => panic!("Expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_query_persist() {
+    let result = parse_one("find * from users >> target");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateTableAs(cta) => {
+            assert_eq!(cta.table, "target");
+            assert!(cta.on_conflict.is_none());
+        }
+        other => panic!("Expected CreateTableAs, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_query_persist_with_schema() {
+    let result = parse_one("find * from orders >> public.archive@pg");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateTableAs(cta) => {
+            assert_eq!(cta.schema.as_deref(), Some("public"));
+            assert_eq!(cta.table, "archive");
+            assert_eq!(cta.connection.as_deref(), Some("pg"));
+        }
+        other => panic!("Expected CreateTableAs, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_query_persist_insert_ignore() {
+    let result = parse_one("find * from users >> target insert if exists on conflict ignore");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateTableAs(cta) => {
+            assert!(matches!(cta.on_conflict, Some(ConflictAction::Ignore)));
+        }
+        other => panic!("Expected CreateTableAs, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_query_persist_insert_replace() {
+    let result = parse_one("find * from users >> target insert if exists on conflict replace");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateTableAs(cta) => {
+            assert!(matches!(cta.on_conflict, Some(ConflictAction::Replace)));
+        }
+        other => panic!("Expected CreateTableAs, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_complex_persist() {
+    let result = parse_one("find [name, email] from users where status = \"active\" >> active_users@pg insert if exists on conflict replace");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateTableAs(cta) => {
+            assert_eq!(cta.table, "active_users");
+            assert_eq!(cta.connection.as_deref(), Some("pg"));
+            assert!(matches!(cta.on_conflict, Some(ConflictAction::Replace)));
+            assert_eq!(cta.query.projection.len(), 2);
+        }
+        other => panic!("Expected CreateTableAs, got {:?}", other),
+    }
+}

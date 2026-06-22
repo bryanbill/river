@@ -84,6 +84,17 @@ pub enum PlanNode {
         database: (String, DatabaseKind),
         sql: String,
     },
+    CreateTable {
+        database: (String, DatabaseKind),
+        sql: String,
+    },
+    CreateTableAs {
+        query_plan: Box<PlanNode>,
+        database: (String, DatabaseKind),
+        target_table: String,
+        target_schema: Option<String>,
+        on_conflict: Option<ConflictAction>,
+    },
     Empty,
 }
 
@@ -170,6 +181,8 @@ fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
         PlanNode::ListTables { database } => Some(database.clone()),
         PlanNode::DescribeTable { database, .. } => Some(database.clone()),
         PlanNode::Dml { database, .. } => Some(database.clone()),
+        PlanNode::CreateTable { database, .. } => Some(database.clone()),
+        PlanNode::CreateTableAs { database, .. } => Some(database.clone()),
         PlanNode::InlineData { .. } | PlanNode::Empty => None,
     }
 }
@@ -402,8 +415,12 @@ pub fn plan_statement(
             let db = resolve_connection(&insert.connection, source_db);
             match db {
                 Some((db_name, db_kind)) => {
-                    let dialect = dialect_for_kind(&db_kind);
-                    let sql = crate::engine::translator::translate_statement_sql(stmt, &*dialect);
+                    let sql = if db_kind == DatabaseKind::MongoDB {
+                        translate_insert_mongo(insert)
+                    } else {
+                        let dialect = dialect_for_kind(&db_kind);
+                        crate::engine::translator::translate_statement_sql(stmt, &*dialect)
+                    };
                     QueryPlan {
                         root: PlanNode::Dml {
                             database: (db_name, db_kind),
@@ -420,8 +437,12 @@ pub fn plan_statement(
             let db = resolve_connection(&update.connection, source_db);
             match db {
                 Some((db_name, db_kind)) => {
-                    let dialect = dialect_for_kind(&db_kind);
-                    let sql = crate::engine::translator::translate_statement_sql(stmt, &*dialect);
+                    let sql = if db_kind == DatabaseKind::MongoDB {
+                        translate_update_mongo(update)
+                    } else {
+                        let dialect = dialect_for_kind(&db_kind);
+                        crate::engine::translator::translate_statement_sql(stmt, &*dialect)
+                    };
                     QueryPlan {
                         root: PlanNode::Dml {
                             database: (db_name, db_kind),
@@ -438,12 +459,61 @@ pub fn plan_statement(
             let db = resolve_connection(&delete.connection, source_db);
             match db {
                 Some((db_name, db_kind)) => {
-                    let dialect = dialect_for_kind(&db_kind);
-                    let sql = crate::engine::translator::translate_statement_sql(stmt, &*dialect);
+                    let sql = if db_kind == DatabaseKind::MongoDB {
+                        translate_delete_mongo(delete)
+                    } else {
+                        let dialect = dialect_for_kind(&db_kind);
+                        crate::engine::translator::translate_statement_sql(stmt, &*dialect)
+                    };
                     QueryPlan {
                         root: PlanNode::Dml {
                             database: (db_name, db_kind),
                             sql,
+                        },
+                    }
+                }
+                None => QueryPlan {
+                    root: PlanNode::Empty,
+                },
+            }
+        }
+        Statement::CreateTable(ct) => {
+            let db = resolve_connection(&ct.connection, source_db);
+            match db {
+                Some((db_name, db_kind)) => {
+                    let sql = if db_kind == DatabaseKind::MongoDB {
+                        format!(
+                            r#"{{"database":"","collection":"{}","create":true}}"#,
+                            ct.table
+                        )
+                    } else {
+                        let dialect = dialect_for_kind(&db_kind);
+                        crate::engine::translator::translate_create_table(ct, &*dialect)
+                    };
+                    QueryPlan {
+                        root: PlanNode::CreateTable {
+                            database: (db_name, db_kind),
+                            sql,
+                        },
+                    }
+                }
+                None => QueryPlan {
+                    root: PlanNode::Empty,
+                },
+            }
+        }
+        Statement::CreateTableAs(cta) => {
+            let db = resolve_connection(&cta.connection, source_db);
+            match db {
+                Some((db_name, db_kind)) => {
+                    let query_plan = plan_query(&cta.query, source_db);
+                    QueryPlan {
+                        root: PlanNode::CreateTableAs {
+                            query_plan: Box::new(query_plan.root),
+                            database: (db_name, db_kind),
+                            target_table: cta.table.clone(),
+                            target_schema: cta.schema.clone(),
+                            on_conflict: cta.on_conflict.clone(),
                         },
                     }
                 }
@@ -473,7 +543,106 @@ fn resolve_connection(
     }
 }
 
-    fn dialect_for_kind(kind: &DatabaseKind) -> Box<dyn crate::engine::translator::SqlDialect> {
+fn expr_to_json_literal(expr: &Expression) -> String {
+    match expr {
+        Expression::String(s) => format!("\"{}\"", s.replace('"', "\\\"").replace('\n', "\\n")),
+        Expression::Number(n) => n.to_string(),
+        Expression::Integer(i) => i.to_string(),
+        Expression::Boolean(true) => "true".to_string(),
+        Expression::Boolean(false) => "false".to_string(),
+        Expression::Null => "null".to_string(),
+        Expression::Ident(name) => format!("\"{}\"", name),
+        _ => "null".to_string(),
+    }
+}
+
+pub fn translate_insert_mongo(insert: &Insert) -> String {
+    let docs: Vec<String> = insert
+        .rows
+        .iter()
+        .map(|row| {
+            let fields: Vec<String> = row
+                .iter()
+                .map(|(col, expr)| format!("\"{}\": {}", col, expr_to_json_literal(expr)))
+                .collect();
+            format!("{{{}}}", fields.join(", "))
+        })
+        .collect();
+
+    format!(
+        r#"{{"database":"","collection":"{}","documents":[{}]}}"#,
+        insert.table,
+        docs.join(", ")
+    )
+}
+
+fn translate_delete_mongo(delete: &Delete) -> String {
+    let filter = match &delete.filter {
+        Some(f) => expr_to_mongo_filter(f),
+        None => "{}".to_string(),
+    };
+    format!(
+        r#"{{"database":"","collection":"{}","delete":{}}}"#,
+        delete.table,
+        filter
+    )
+}
+
+fn translate_update_mongo(update: &Update) -> String {
+    let set_fields: Vec<String> = update
+        .assignments
+        .iter()
+        .map(|(col, expr)| format!("\"{}\": {}", col, expr_to_json_literal(expr)))
+        .collect();
+    let set_obj = format!("{{{}}}", set_fields.join(", "));
+    let filter = match &update.filter {
+        Some(f) => expr_to_mongo_filter(f),
+        None => "{}".to_string(),
+    };
+    format!(
+        r#"{{"database":"","collection":"{}","filter":{},"update":{}}}"#,
+        update.table,
+        filter,
+        set_obj
+    )
+}
+
+fn expr_to_mongo_filter(expr: &Expression) -> String {
+    match expr {
+        Expression::BinaryOp { op: BinaryOp::Eq, left, right } => {
+            let col = match left.as_ref() {
+                Expression::Ident(name) => name.clone(),
+                Expression::QualifiedIdent { field, .. } => field.clone(),
+                _ => return "{}".to_string(),
+            };
+            // If right side is also an Ident, treat as match-all (e.g., "where col = col")
+            match right.as_ref() {
+                Expression::Ident(_) | Expression::QualifiedIdent { .. } => {
+                    return "{}".to_string();
+                }
+                _ => {}
+            }
+            let val = expr_to_json_literal(right);
+            format!(r#"{{"{}": {}}}"#, col, val)
+        }
+        Expression::BinaryOp { op: BinaryOp::Gt, left, right } => {
+            let col = match left.as_ref() {
+                Expression::Ident(name) => name.clone(),
+                Expression::QualifiedIdent { field, .. } => field.clone(),
+                _ => return "{}".to_string(),
+            };
+            let val = match right.as_ref() {
+                Expression::Integer(n) => n.to_string(),
+                _ => return "{}".to_string(),
+            };
+            format!(r#"{{"{}": {{"$gt": {}}}}}"#, col, val)
+        }
+        Expression::Boolean(true) => "{}".to_string(),
+        _ => "{}".to_string(),
+    }
+}
+
+fn dialect_for_kind(kind: &DatabaseKind) -> Box<dyn crate::engine::translator::SqlDialect> {
     crate::engine::translator::dialect_for(kind)
 }
 
@@ -689,6 +858,33 @@ fn format_node(node: &PlanNode, lines: &mut Vec<String>, prefix: String, is_last
                 database.0, database.1
             ));
         }
+        PlanNode::CreateTable { database, sql } => {
+            lines.push(format!(
+                "{connector}CreateTable @ {}:{:?} — {sql}",
+                database.0, database.1
+            ));
+        }
+        PlanNode::CreateTableAs {
+            query_plan,
+            database,
+            target_table,
+            target_schema,
+            on_conflict,
+        } => {
+            let schema_prefix = target_schema
+                .as_ref()
+                .map(|s| format!("{}.", s))
+                .unwrap_or_default();
+            let conflict_str = on_conflict
+                .as_ref()
+                .map(|c| format!(" ON CONFLICT {:?}", c))
+                .unwrap_or_default();
+            lines.push(format!(
+                "{connector}CreateTableAs INTO {schema_prefix}{target_table} @ {}:{:?}{conflict_str}",
+                database.0, database.1
+            ));
+            format_node(query_plan, lines, child_prefix, true);
+        }
         PlanNode::Empty => {
             lines.push(format!("{connector}(empty plan)"));
         }
@@ -814,6 +1010,15 @@ fn collect_databases(node: &PlanNode, out: &mut Vec<(String, DatabaseKind)>) {
             out.push(database.clone());
         }
         PlanNode::Dml { database, .. } => {
+            out.push(database.clone());
+        }
+        PlanNode::CreateTable { database, .. } => {
+            out.push(database.clone());
+        }
+        PlanNode::CreateTableAs {
+            query_plan, database, ..
+        } => {
+            collect_databases(query_plan, out);
             out.push(database.clone());
         }
         PlanNode::InlineData { .. } | PlanNode::Empty => {}
