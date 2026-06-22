@@ -18,6 +18,7 @@ fn table_source(name: &str) -> Source {
         name: name.to_string(),
         alias: None,
         connection: None,
+        schema: None,
         kind: SourceKind::Table(name.to_string()),
     }
 }
@@ -588,6 +589,7 @@ fn translate_between_postgres() {
 #[test]
 fn translate_insert_postgres() {
     let insert = Insert {
+        schema: None,
         table: "users".into(),
         connection: None,
         columns: Some(vec!["name".into(), "age".into()]),
@@ -607,6 +609,7 @@ fn translate_insert_postgres() {
 #[test]
 fn translate_update_mysql() {
     let update = Update {
+        schema: None,
         table: "users".into(),
         connection: None,
         assignments: vec![
@@ -628,6 +631,7 @@ fn translate_update_mysql() {
 #[test]
 fn translate_delete_mssql() {
     let delete = Delete {
+        schema: None,
         table: "users".into(),
         connection: None,
         filter: Some(Expression::BinaryOp {
@@ -680,4 +684,98 @@ fn translate_case_postgres() {
     assert!(sql.contains("THEN 'A'"), "got: {sql}");
     assert!(sql.contains("ELSE 'B'"), "got: {sql}");
     assert!(sql.ends_with("END"), "got: {sql}");
+}
+
+// ── Schema-qualified tables ────────────────────────────────────────────────
+
+#[test]
+fn translate_schema_table_postgres() {
+    let mut q = Query::default();
+    q.projection = vec![Projection::Wildcard];
+    q.sources.push(Source {
+        name: "users".into(),
+        alias: None,
+        connection: None,
+        schema: Some("public".into()),
+        kind: SourceKind::Table("users".into()),
+    });
+    let sql = translate_query(&q, &PostgresDialect);
+    assert_eq!(sql, r#"SELECT * FROM "public"."users""#);
+}
+
+#[test]
+fn translate_schema_table_mysql() {
+    let mut q = Query::default();
+    q.projection = vec![Projection::Wildcard];
+    q.sources.push(Source {
+        name: "users".into(),
+        alias: None,
+        connection: None,
+        schema: Some("inventory".into()),
+        kind: SourceKind::Table("users".into()),
+    });
+    let sql = translate_query(&q, &MySQLDialect);
+    assert_eq!(sql, "SELECT * FROM `inventory`.`users`");
+}
+
+#[test]
+fn translate_schema_table_aliased() {
+    let mut q = Query::default();
+    q.projection = vec![Projection::Wildcard];
+    q.sources.push(Source {
+        name: "u".into(),
+        alias: Some("u".into()),
+        connection: None,
+        schema: Some("public".into()),
+        kind: SourceKind::Table("users".into()),
+    });
+    let sql = translate_query(&q, &PostgresDialect);
+    assert_eq!(sql, r#"SELECT * FROM "public"."users" AS "u""#);
+}
+
+#[test]
+fn translate_insert_with_schema() {
+    let insert = Insert {
+        schema: Some("public".into()),
+        table: "users".into(),
+        connection: None,
+        columns: Some(vec!["name".into()]),
+        rows: vec![vec![("name".into(), Expression::String("Alice".into()))]],
+        query: None,
+    };
+    let sql = translate_statement_sql(&Statement::Insert(insert), &PostgresDialect);
+    assert_eq!(sql, r#"INSERT INTO "public"."users" ("name") VALUES ('Alice')"#);
+}
+
+#[test]
+fn translate_update_with_schema() {
+    let update = Update {
+        schema: Some("sales".into()),
+        table: "orders".into(),
+        connection: None,
+        assignments: vec![("status".into(), Expression::String("shipped".into()))],
+        filter: Some(Expression::BinaryOp {
+            op: BinaryOp::Eq,
+            left: Box::new(Expression::Ident("id".into())),
+            right: Box::new(Expression::Integer(1)),
+        }),
+    };
+    let sql = translate_statement_sql(&Statement::Update(update), &MySQLDialect);
+    assert_eq!(sql, "UPDATE `sales`.`orders` SET `status` = 'shipped' WHERE (`id` = 1)");
+}
+
+#[test]
+fn translate_delete_with_schema() {
+    let delete = Delete {
+        schema: Some("archive".into()),
+        table: "logs".into(),
+        connection: None,
+        filter: Some(Expression::BinaryOp {
+            op: BinaryOp::Eq,
+            left: Box::new(Expression::Ident("id".into())),
+            right: Box::new(Expression::Integer(42)),
+        }),
+    };
+    let sql = translate_statement_sql(&Statement::Delete(delete), &MSSQLDialect);
+    assert_eq!(sql, "DELETE FROM [archive].[logs] WHERE ([id] = 42)");
 }

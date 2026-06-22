@@ -78,6 +78,7 @@ pub enum PlanNode {
     DescribeTable {
         database: (String, DatabaseKind),
         table: String,
+        schema: Option<String>,
     },
     Dml {
         database: (String, DatabaseKind),
@@ -389,6 +390,7 @@ pub fn plan_statement(
                     root: PlanNode::DescribeTable {
                         database,
                         table: desc.table.clone(),
+                        schema: desc.schema.clone(),
                     },
                 },
                 None => QueryPlan {
@@ -671,9 +673,13 @@ fn format_node(node: &PlanNode, lines: &mut Vec<String>, prefix: String, is_last
                 database.0, database.1
             ));
         }
-        PlanNode::DescribeTable { database, table } => {
+        PlanNode::DescribeTable { database, table, schema } => {
+            let schema_prefix = schema
+                .as_ref()
+                .map(|s| format!("{}.", s))
+                .unwrap_or_default();
             lines.push(format!(
-                "{connector}DescribeTable \"{table}\" @ {}:{:?}",
+                "{connector}DescribeTable \"{schema_prefix}{table}\" @ {}:{:?}",
                 database.0, database.1
             ));
         }

@@ -112,7 +112,7 @@ impl DatabaseAdapter for SQLiteAdapter {
         })
     }
 
-    async fn list_tables(&self) -> Result<Vec<TableInfo>, RiverError> {
+    async fn list_tables(&self, _schema: Option<&str>) -> Result<Vec<TableInfo>, RiverError> {
         let rows = sqlx::query_as::<_, (String,)>(
             "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
         )
@@ -125,7 +125,7 @@ impl DatabaseAdapter for SQLiteAdapter {
             .collect())
     }
 
-    async fn describe_table(&self, table: &str) -> Result<TableSchema, RiverError> {
+    async fn describe_table(&self, table: &str, _schema: Option<&str>) -> Result<TableSchema, RiverError> {
         let query = format!("PRAGMA table_info('{}')", table);
         let rows = sqlx::query_as::<_, (i32, String, String, i32, String, i32)>(
             AssertSqlSafe(query),

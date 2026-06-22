@@ -517,8 +517,17 @@ fn named_window(expr: Parser_<Expression>) -> Parser_<WindowDef> {
 
 // ── Sources and joins ────────────────────────────────────────────────────────
 
-fn source_name() -> Parser_<(String, Option<String>)> {
-    ident_or_keyword().then(tok(Token::At).ignore_then(ident_or_keyword()).or_not()).boxed()
+fn source_name() -> Parser_<(Option<String>, String, Option<String>)> {
+    ident_or_keyword()
+        .then(tok(Token::Dot).ignore_then(ident_or_keyword()).or_not())
+        .then(tok(Token::At).ignore_then(ident_or_keyword()).or_not())
+        .map(|((first, second), conn)| {
+            match second {
+                Some(table_name) => (Some(first), table_name, conn),
+                None => (None, first, conn),
+            }
+        })
+        .boxed()
 }
 
 fn source(_expr: Parser_<Expression>, query_p: Parser_<Query>) -> Parser_<Source> {
@@ -530,17 +539,19 @@ fn source(_expr: Parser_<Expression>, query_p: Parser_<Query>) -> Parser_<Source
             name: alias.clone(),
             alias: Some(alias),
             connection: None,
+            schema: None,
             kind: SourceKind::Subquery(Box::new(q)),
         });
 
     let table_src = source_name()
         .then(tok(Token::As).ignore_then(ident()).or_not())
-        .map(|((name, conn), alias)| {
+        .map(|((schema, name, conn), alias)| {
             let display = alias.clone().unwrap_or_else(|| name.clone());
             Source {
                 name: display,
                 alias,
                 connection: conn,
+                schema,
                 kind: SourceKind::Table(name),
             }
         });
@@ -1062,12 +1073,12 @@ pub fn parser() -> Parser_<Vec<Statement>> {
             .map(|s| Statement::Explain(Box::new(s)));
 
         let describe = tok(Token::Describe)
-            .ignore_then(ident_or_keyword())
-            .then(tok(Token::At).ignore_then(ident_or_keyword()).or_not())
-            .map(|(table, conn)| {
+            .ignore_then(source_name())
+            .map(|(schema, table, conn)| {
                 Statement::Describe(Describe {
                     table,
                     connection: conn,
+                    schema,
                 })
             });
 
@@ -1082,8 +1093,7 @@ pub fn parser() -> Parser_<Vec<Statement>> {
             .map(|(name, value)| Statement::ParamAssign { name, value });
 
         let insert = tok(Token::Create)
-            .ignore_then(ident_or_keyword())
-            .then(tok(Token::At).ignore_then(ident_or_keyword()).or_not())
+            .ignore_then(source_name())
             .then(choice((
                 object_field(expr_p.clone())
                     .separated_by(tok(Token::Comma))
@@ -1108,10 +1118,11 @@ pub fn parser() -> Parser_<Vec<Statement>> {
                     .then_ignore(tok(Token::RParen))
                     .map(|q| (Vec::<String>::new(), Vec::new(), Some(Box::new(q)))),
             )))
-            .map(|((table, conn), (_cols, rows, query))| {
+            .map(|((schema, table, conn), (_cols, rows, query))| {
                 Statement::Insert(Insert {
                     table,
                     connection: conn,
+                    schema,
                     columns: None,
                     rows,
                     query,
@@ -1119,8 +1130,7 @@ pub fn parser() -> Parser_<Vec<Statement>> {
             });
 
         let update = tok(Token::Update)
-            .ignore_then(ident_or_keyword())
-            .then(tok(Token::At).ignore_then(ident_or_keyword()).or_not())
+            .ignore_then(source_name())
             .then_ignore(tok(Token::Set))
             .then(
                 ident_or_keyword()
@@ -1133,27 +1143,28 @@ pub fn parser() -> Parser_<Vec<Statement>> {
                     .ignore_then(expr_p.clone())
                     .or_not(),
             )
-            .map(|(((table, conn), assignments), filter)| {
+            .map(|(((schema, table, conn), assignments), filter)| {
                 Statement::Update(Update {
                     table,
                     connection: conn,
+                    schema,
                     assignments,
                     filter,
                 })
             });
 
         let delete = tok(Token::Remove)
-            .ignore_then(ident_or_keyword())
-            .then(tok(Token::At).ignore_then(ident_or_keyword()).or_not())
+            .ignore_then(source_name())
             .then(
                 tok(Token::Where)
                     .ignore_then(expr_p)
                     .or_not(),
             )
-            .map(|((table, conn), filter)| {
+            .map(|((schema, table, conn), filter)| {
                 Statement::Delete(Delete {
                     table,
                     connection: conn,
+                    schema,
                     filter,
                 })
             });

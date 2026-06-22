@@ -5,6 +5,7 @@
 - name: mysql
   kind: mysql
   uri: "mysql://river:river@localhost:3307/river"
+  schema: river
 
 # - name: mssql
 #   kind: mssql

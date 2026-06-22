@@ -130,12 +130,17 @@ impl DatabaseAdapter for MySQLAdapter {
         })
     }
 
-    async fn list_tables(&self) -> Result<Vec<TableInfo>, RiverError> {
-        let rows = sqlx::query_as::<_, (String, String)>(
+    async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<TableInfo>, RiverError> {
+        let schema_filter = schema
+            .map(|s| format!(" AND table_schema = '{}'", s.replace('\'', "''")))
+            .unwrap_or_default();
+        let query = format!(
             "SELECT table_schema, table_name FROM information_schema.tables \
-             WHERE table_type = 'BASE TABLE' \
+             WHERE table_type = 'BASE TABLE'{} \
              ORDER BY table_schema, table_name",
-        )
+            schema_filter
+        );
+        let rows = sqlx::query_as::<_, (String, String)>(AssertSqlSafe(query))
         .fetch_all(&self.pool)
         .await?;
 
@@ -148,12 +153,17 @@ impl DatabaseAdapter for MySQLAdapter {
             .collect())
     }
 
-    async fn describe_table(&self, table: &str) -> Result<TableSchema, RiverError> {
-        let rows = sqlx::query_as::<_, (String, String, String)>(
+    async fn describe_table(&self, table: &str, schema: Option<&str>) -> Result<TableSchema, RiverError> {
+        let schema_filter = schema
+            .map(|s| format!(" AND table_schema = '{}'", s.replace('\'', "''")))
+            .unwrap_or_default();
+        let query = format!(
             "SELECT column_name, data_type, is_nullable \
              FROM information_schema.columns \
-             WHERE table_name = ? ORDER BY ordinal_position",
-        )
+             WHERE table_name = ?{} ORDER BY ordinal_position",
+            schema_filter
+        );
+        let rows = sqlx::query_as::<_, (String, String, String)>(AssertSqlSafe(query))
         .bind(table)
         .fetch_all(&self.pool)
         .await?;

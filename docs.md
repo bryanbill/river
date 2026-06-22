@@ -947,6 +947,37 @@ join orders on users.id = orders.user_id
 
 ---
 
+## Schema-Qualified Tables
+
+Prefix a table name with `schema.` to query tables in a specific database schema:
+
+```sql
+find * from public.users
+```
+
+When omitted, the connection's `schema` (configured in `river.yaml`) or the database-native default (e.g., `public` for Postgres) is used.
+
+Combine with a connection reference:
+
+```sql
+find [name, email] from myschema.users@pg
+```
+
+Schema qualification works across all statement types:
+
+```sql
+describe public.users
+describe inventory.products@pg
+show tables @pg
+create public.users { name: "Alice" }
+update sales.orders@pg set status = "shipped" where id = 1
+remove archive.logs@mongo where created_at < now() - 30d
+```
+
+For Postgres, MySQL, and MSSQL, `describe` filters by both table name and schema, avoiding ambiguity when the same table name exists in multiple schemas. SQLite ignores the schema prefix (SQLite has no schemas).
+
+---
+
 ## Cross-Database Queries
 
 River can query across different database systems in a single statement. Use `@connection-name` to specify which database a table lives in.
@@ -1002,10 +1033,12 @@ NOTE: Avoid using `-` in connection names
 - name: pg
   kind: postgres
   uri: "postgres://river:river@localhost:5432/river"
+  schema: public
 
 - name: mysql
   kind: mysql
   uri: "mysql://river:river@localhost:3306/river"
+  schema: river
 
 - name: mongo
   kind: mongodb
@@ -1320,6 +1353,7 @@ limit N offset M
 | `\|\|`             | String concatenation  |
 | `::`               | Type cast             |
 | `@`                | Connection reference  |
+| `.`                | Schema/field separator |
 
 ### Operator Precedence (low to high)
 

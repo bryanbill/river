@@ -338,7 +338,7 @@ async fn execute_node(
             let adapter = adapters.get(&database.0).ok_or_else(|| {
                 RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
             })?;
-            let tables = adapter.list_tables().await?;
+            let tables = adapter.list_tables(None).await?;
             let rows: Vec<Vec<Value>> = tables
                 .into_iter()
                 .map(|t| vec![Value::String(t.name)])
@@ -350,12 +350,12 @@ async fn execute_node(
                 rows_affected: 0,
             })
         }
-        PlanNode::DescribeTable { database, table } => {
+        PlanNode::DescribeTable { database, table, schema } => {
             let adapter = adapters.get(&database.0).ok_or_else(|| {
                 RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
             })?;
-            let schema = adapter.describe_table(&table).await?;
-            let rows: Vec<Vec<Value>> = schema
+            let table_schema = adapter.describe_table(&table, schema.as_deref()).await?;
+            let rows: Vec<Vec<Value>> = table_schema
                 .columns
                 .into_iter()
                 .map(|c| {
@@ -473,6 +473,7 @@ async fn execute_semi_join_fetch(
         SourceKind::Table(t) => t.clone(),
         _ => probe_source.name.clone(),
     };
+    let schema = probe_source.schema.as_deref();
 
     let mut probe_rows: Vec<Vec<Value>> = Vec::new();
     let mut probe_columns: Vec<String> = Vec::new();
@@ -494,7 +495,7 @@ async fn execute_semi_join_fetch(
                     DatabaseKind::MongoDB => unreachable!(),
                 };
                 crate::engine::translator::build_probe_query_sql(
-                    &table_name, &probe_key_col, chunk, dialect.as_ref(),
+                    &table_name, schema, &probe_key_col, chunk, dialect.as_ref(),
                 )
             }
         };
@@ -1766,6 +1767,7 @@ mod tests {
         let plan = PlanNode::Join {
             left: Box::new(PlanNode::Scan {
                 source: Source {
+                    schema: None,
                     name: "u".into(),
                     alias: None,
                     connection: Some("pg".into()),
@@ -1776,6 +1778,7 @@ mod tests {
             }),
             right: Box::new(PlanNode::Scan {
                 source: Source {
+                    schema: None,
                     name: "o".into(),
                     alias: None,
                     connection: Some("mongo".into()),
@@ -1798,6 +1801,7 @@ mod tests {
         let plan = PlanNode::Join {
             left: Box::new(PlanNode::Scan {
                 source: Source {
+                    schema: None,
                     name: "u".into(),
                     alias: None,
                     connection: Some("pg".into()),
@@ -1808,6 +1812,7 @@ mod tests {
             }),
             right: Box::new(PlanNode::Scan {
                 source: Source {
+                    schema: None,
                     name: "o".into(),
                     alias: None,
                     connection: Some("pg".into()),
@@ -1830,6 +1835,7 @@ mod tests {
         let plan = PlanNode::Join {
             left: Box::new(PlanNode::Scan {
                 source: Source {
+                    schema: None,
                     name: "a".into(),
                     alias: None,
                     connection: Some("pg".into()),
@@ -1840,6 +1846,7 @@ mod tests {
             }),
             right: Box::new(PlanNode::Scan {
                 source: Source {
+                    schema: None,
                     name: "b".into(),
                     alias: None,
                     connection: Some("mongo".into()),
@@ -1862,6 +1869,7 @@ mod tests {
     #[test]
     fn collect_single_db_scan() {
         let source = Source {
+        schema: None,
             name: "users".into(),
             alias: None,
             connection: None,
@@ -1883,6 +1891,7 @@ mod tests {
     #[test]
     fn collect_single_db_with_filter() {
         let source = Source {
+        schema: None,
             name: "users".into(),
             alias: None,
             connection: None,
@@ -1909,6 +1918,7 @@ mod tests {
     fn collect_single_db_rejects_cross_db_join() {
         let left = PlanNode::Scan {
             source: Source {
+                    schema: None,
                 name: "a".into(),
                 alias: None,
                 connection: None,
@@ -1919,6 +1929,7 @@ mod tests {
         };
         let right = PlanNode::Scan {
             source: Source {
+                    schema: None,
                 name: "b".into(),
                 alias: None,
                 connection: None,
@@ -1944,6 +1955,7 @@ mod tests {
     fn translate_postgres() {
         let q = Query {
             sources: vec![Source {
+                schema: None,
                 name: "users".into(),
                 alias: None,
                 connection: None,
@@ -1959,6 +1971,7 @@ mod tests {
     fn translate_mysql() {
         let q = Query {
             sources: vec![Source {
+                schema: None,
                 name: "users".into(),
                 alias: None,
                 connection: None,
@@ -2025,10 +2038,10 @@ mod tests {
             }
         }
 
-        async fn list_tables(&self) -> Result<Vec<TableInfo>, RiverError> {
+        async fn list_tables(&self, _schema: Option<&str>) -> Result<Vec<TableInfo>, RiverError> {
             Ok(vec![])
         }
-        async fn describe_table(&self, _table: &str) -> Result<TableSchema, RiverError> {
+        async fn describe_table(&self, _table: &str, _schema: Option<&str>) -> Result<TableSchema, RiverError> {
             Ok(TableSchema {
                 name: "mock".into(),
                 columns: vec![],

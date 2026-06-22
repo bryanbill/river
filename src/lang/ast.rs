@@ -110,6 +110,7 @@ pub struct Source {
     pub name: String,
     pub alias: Option<String>,
     pub connection: Option<String>,
+    pub schema: Option<String>,
     pub kind: SourceKind,
 }
 
@@ -368,6 +369,7 @@ pub enum DataType {
 pub struct Insert {
     pub table: String,
     pub connection: Option<String>,
+    pub schema: Option<String>,
     pub columns: Option<Vec<String>>,
     pub rows: Vec<Vec<(String, Expression)>>,
     pub query: Option<Box<Query>>,
@@ -377,6 +379,7 @@ pub struct Insert {
 pub struct Update {
     pub table: String,
     pub connection: Option<String>,
+    pub schema: Option<String>,
     pub assignments: Vec<(String, Expression)>,
     pub filter: Option<Expression>,
 }
@@ -385,6 +388,7 @@ pub struct Update {
 pub struct Delete {
     pub table: String,
     pub connection: Option<String>,
+    pub schema: Option<String>,
     pub filter: Option<Expression>,
 }
 
@@ -392,4 +396,5 @@ pub struct Delete {
 pub struct Describe {
     pub table: String,
     pub connection: Option<String>,
+    pub schema: Option<String>,
 }

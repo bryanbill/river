@@ -547,9 +547,20 @@ pub fn translate_query(query: &Query, dialect: &dyn SqlDialect) -> String {
     query_str
 }
 
+fn qualify_table(table: &str, schema: Option<&str>, dialect: &dyn SqlDialect) -> String {
+    let table_ident = dialect.quote_ident(table);
+    if let Some(s) = schema {
+        format!("{}.{}", dialect.quote_ident(s), table_ident)
+    } else {
+        table_ident
+    }
+}
+
 fn translate_source_sql(source: &Source, dialect: &dyn SqlDialect) -> String {
     let name = match &source.kind {
-        SourceKind::Table(t) => dialect.quote_ident(t),
+        SourceKind::Table(t) => {
+            qualify_table(t, source.schema.as_deref(), dialect)
+        }
         SourceKind::Subquery(q) => format!("({})", translate_query(q, dialect)),
         SourceKind::CteRef(cte_name) => dialect.quote_ident(cte_name),
     };
@@ -582,7 +593,7 @@ pub fn translate_statement_sql(stmt: &Statement, dialect: &dyn SqlDialect) -> St
 }
 
 fn translate_insert_sql(insert: &Insert, dialect: &dyn SqlDialect) -> String {
-    let table = dialect.quote_ident(&insert.table);
+    let table = qualify_table(&insert.table, insert.schema.as_deref(), dialect);
 
     if let Some(query) = &insert.query {
         return format!("INSERT INTO {} {}", table, translate_query(query, dialect));
@@ -620,7 +631,7 @@ fn translate_insert_sql(insert: &Insert, dialect: &dyn SqlDialect) -> String {
 }
 
 fn translate_update_sql(update: &Update, dialect: &dyn SqlDialect) -> String {
-    let table = dialect.quote_ident(&update.table);
+    let table = qualify_table(&update.table, update.schema.as_deref(), dialect);
 
     let sets: Vec<String> = update
         .assignments
@@ -640,7 +651,7 @@ fn translate_update_sql(update: &Update, dialect: &dyn SqlDialect) -> String {
 }
 
 fn translate_delete_sql(delete: &Delete, dialect: &dyn SqlDialect) -> String {
-    let table = dialect.quote_ident(&delete.table);
+    let table = qualify_table(&delete.table, delete.schema.as_deref(), dialect);
     let mut query_str = format!("DELETE FROM {}", table);
 
     if let Some(filter) = &delete.filter {
@@ -1045,11 +1056,12 @@ pub fn translate_in_list_mongo(column: &str, values: &[Value]) -> JsonValue {
 
 pub fn build_probe_query_sql(
     table: &str,
+    schema: Option<&str>,
     key_column: &str,
     values: &[Value],
     dialect: &dyn SqlDialect,
 ) -> String {
-    let table_quoted = dialect.quote_ident(table);
+    let table_quoted = qualify_table(table, schema, dialect);
     let in_clause = translate_in_list(key_column, values, dialect);
     format!("SELECT * FROM {} WHERE {}", table_quoted, in_clause)
 }
@@ -1128,14 +1140,14 @@ mod tests {
     #[test]
     fn build_probe_sql_postgres() {
         let values = vec![Value::Int(10), Value::Int(20)];
-        let sql = build_probe_query_sql("orders", "user_id", &values, &PostgresDialect);
+        let sql = build_probe_query_sql("orders", None, "user_id", &values, &PostgresDialect);
         assert_eq!(sql, r#"SELECT * FROM "orders" WHERE "user_id" IN (10, 20)"#);
     }
 
     #[test]
     fn build_probe_sql_mysql() {
         let values = vec![Value::Int(5)];
-        let sql = build_probe_query_sql("users", "id", &values, &MySQLDialect);
+        let sql = build_probe_query_sql("users", None, "id", &values, &MySQLDialect);
         assert_eq!(sql, "SELECT * FROM `users` WHERE `id` IN (5)");
     }
 

@@ -94,11 +94,11 @@ pub trait DatabaseAdapter: Send + Sync {
     /// Execute a raw SQL query and return the result set.
     async fn execute(&self, query: &str) -> Result<QueryResult, RiverError>;
 
-    /// List all tables in the current database.
-    async fn list_tables(&self) -> Result<Vec<TableInfo>, RiverError>;
+    /// List all tables, optionally filtered by schema.
+    async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<TableInfo>, RiverError>;
 
-    /// Describe the columns of a given table.
-    async fn describe_table(&self, table: &str) -> Result<TableSchema, RiverError>;
+    /// Describe the columns of a given table, optionally within a specific schema.
+    async fn describe_table(&self, table: &str, schema: Option<&str>) -> Result<TableSchema, RiverError>;
 
     /// Return which database dialect this adapter speaks.
     fn dialect(&self) -> DatabaseKind;

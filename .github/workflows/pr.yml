@@ -31,9 +31,6 @@ jobs:
         run: |
           python3 seed.py
 
-      - name: Build
-        run: cargo build --release
-
       - name: Run integration tests
         run: cargo test --test integrations -- --test-threads=1
         timeout-minutes: 15

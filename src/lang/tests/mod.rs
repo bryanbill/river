@@ -564,6 +564,116 @@ fn param_assign() {
     assert!(parse_one(":start_date = \"2024-01-01\"").is_ok());
 }
 
+// ── Schema-qualified tables ──────────────────────────────────────────────────
+
+#[test]
+fn schema_table() {
+    let result = parse_one("find * from public.users");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    let stmts = result.unwrap();
+    assert_eq!(stmts.len(), 1);
+    if let Statement::Query(q) = &stmts[0] {
+        assert_eq!(q.sources[0].schema, Some("public".to_string()));
+        if let SourceKind::Table(t) = &q.sources[0].kind {
+            assert_eq!(t, "users");
+        } else {
+            panic!("expected Table source kind");
+        }
+    }
+}
+
+#[test]
+fn schema_table_at_connection() {
+    let result = parse_one("find * from myschema.users@pg");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    let stmts = result.unwrap();
+    assert_eq!(stmts.len(), 1);
+    if let Statement::Query(q) = &stmts[0] {
+        assert_eq!(q.sources[0].schema, Some("myschema".to_string()));
+        assert_eq!(q.sources[0].connection, Some("pg".to_string()));
+        if let SourceKind::Table(t) = &q.sources[0].kind {
+            assert_eq!(t, "users");
+        } else {
+            panic!("expected Table source kind");
+        }
+    }
+}
+
+#[test]
+fn schema_table_in_join() {
+    let result = parse_one(
+        "find [u.name, o.total] from public.users as u join sales.orders as o on u.id = o.user_id"
+    );
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    let stmts = result.unwrap();
+    if let Statement::Query(q) = &stmts[0] {
+        assert_eq!(q.sources[0].schema, Some("public".to_string()));
+        assert_eq!(q.joins[0].source.schema, Some("sales".to_string()));
+    }
+}
+
+#[test]
+fn describe_schema_table() {
+    let result = parse_one("describe public.users");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    let stmts = result.unwrap();
+    if let Statement::Describe(d) = &stmts[0] {
+        assert_eq!(d.schema, Some("public".to_string()));
+        assert_eq!(d.table, "users");
+    } else {
+        panic!("expected Describe statement");
+    }
+}
+
+#[test]
+fn describe_schema_table_at_connection() {
+    let result = parse_one("describe inventory.products@pg");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    let stmts = result.unwrap();
+    if let Statement::Describe(d) = &stmts[0] {
+        assert_eq!(d.schema, Some("inventory".to_string()));
+        assert_eq!(d.table, "products");
+        assert_eq!(d.connection, Some("pg".to_string()));
+    } else {
+        panic!("expected Describe statement");
+    }
+}
+
+#[test]
+fn dml_with_schema() {
+    let result = parse_one("create public.users { name: \"Alice\" }");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    let stmts = result.unwrap();
+    if let Statement::Insert(i) = &stmts[0] {
+        assert_eq!(i.schema, Some("public".to_string()));
+        assert_eq!(i.table, "users");
+    }
+}
+
+#[test]
+fn dml_with_schema_at_connection() {
+    let result = parse_one("update inventory.products@pg set price = 9.99 where id = 1");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    let stmts = result.unwrap();
+    if let Statement::Update(u) = &stmts[0] {
+        assert_eq!(u.schema, Some("inventory".to_string()));
+        assert_eq!(u.table, "products");
+        assert_eq!(u.connection, Some("pg".to_string()));
+    }
+}
+
+#[test]
+fn delete_with_schema() {
+    let result = parse_one("remove archive.logs@mongo where created_at < now() - 30d");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    let stmts = result.unwrap();
+    if let Statement::Delete(d) = &stmts[0] {
+        assert_eq!(d.schema, Some("archive".to_string()));
+        assert_eq!(d.table, "logs");
+        assert_eq!(d.connection, Some("mongo".to_string()));
+    }
+}
+
 // ── Cross-database ───────────────────────────────────────────────────────────
 
 #[test]
