@@ -51,7 +51,6 @@ install_river() {
     info "Detected  : ${target}"
     info "Downloading: ${release_url}"
 
-    local tmpdir
     tmpdir=$(mktemp -d)
     trap 'rm -rf "$tmpdir"' EXIT
 
