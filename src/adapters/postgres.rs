@@ -128,9 +128,11 @@ impl DatabaseAdapter for PostgresAdapter {
         };
 
         let data: Vec<Vec<Value>> = rows.iter().map(row_to_values).collect();
+        let num_cols = columns.len();
 
         Ok(QueryResult {
             columns,
+            column_sources: vec![None; num_cols],
             rows: data,
             elapsed,
             rows_affected: rows.len() as u64,

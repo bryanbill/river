@@ -152,9 +152,11 @@ impl DatabaseAdapter for MssqlAdapter {
             };
 
         let elapsed = start.elapsed();
+        let num_cols = columns.len();
 
         Ok(QueryResult {
             columns,
+            column_sources: vec![None; num_cols],
             rows_affected,
             rows,
             elapsed,

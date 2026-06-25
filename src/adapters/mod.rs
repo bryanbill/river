@@ -53,6 +53,7 @@ impl Hash for Value {
 #[derive(Debug, Clone)]
 pub struct QueryResult {
     pub columns: Vec<String>,
+    pub column_sources: Vec<Option<String>>,
     pub rows: Vec<Vec<Value>>,
     pub elapsed: Duration,
     pub rows_affected: u64,
