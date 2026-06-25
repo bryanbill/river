@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|c| (c.name.clone(), c.kind.clone()))
         .collect();
 
-    let mut app = app::App::new(connections, adapters, source_db, conn_errors);
+    let mut app = app::App::new(adapters, source_db, conn_errors);
 
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
@@ -115,10 +115,10 @@ fn load_config(path: &str) -> anyhow::Result<Vec<connection::ConnectionConfig>> 
     let content = std::fs::read_to_string(path)?;
 
     // Try reading as ConfigFile with `connections:` key first
-    if let Ok(cfg) = serde_yaml::from_str::<ConfigFile>(&content) {
-        if !cfg.connections.is_empty() {
-            return Ok(cfg.connections);
-        }
+    if let Ok(cfg) = serde_yaml::from_str::<ConfigFile>(&content)
+        && !cfg.connections.is_empty()
+    {
+        return Ok(cfg.connections);
     }
 
     // Fall back to flat array of ConnectionConfig

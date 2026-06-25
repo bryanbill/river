@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
@@ -18,7 +16,6 @@ pub enum TokenKind {
     Punctuation,
     Bool,
     Null,
-    Default,
 }
 
 pub fn token_kind(token: &Token) -> TokenKind {
@@ -74,7 +71,6 @@ pub fn style_for_kind(kind: TokenKind, theme: &Theme) -> Style {
         TokenKind::Punctuation => Style::default().fg(theme.syntax_punctuation),
         TokenKind::Bool => Style::default().fg(theme.syntax_bool),
         TokenKind::Null => Style::default().fg(theme.syntax_null),
-        TokenKind::Default => Style::default().fg(theme.syntax_identifier),
     }
 }
 

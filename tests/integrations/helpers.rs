@@ -1,9 +1,9 @@
+#![allow(dead_code)]
+
 //! Seed formula helpers for exact-match assertions.
 //!
 //! These mirror the deterministic formulas in `infra/seed.py` so tests can
 //! compute expected values without hitting the database.
-
-#![allow(dead_code)]
 
 pub const ROWS: usize = 10_000;
 

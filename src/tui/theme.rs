@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use ratatui::style::{Color, Modifier, Style};
 
 pub struct Theme {
@@ -34,7 +32,6 @@ pub struct Theme {
     pub syntax_punctuation: Color,
     pub syntax_bool: Color,
     pub syntax_null: Color,
-    pub syntax_comment: Color,
 }
 
 impl Theme {
@@ -71,44 +68,6 @@ impl Theme {
             syntax_punctuation: Color::Rgb(92, 99, 112),
             syntax_bool: Color::Rgb(86, 182, 194),
             syntax_null: Color::Rgb(92, 99, 112),
-            syntax_comment: Color::Rgb(92, 99, 112),
-        }
-    }
-
-    pub fn light() -> Self {
-        Self {
-            header_bg: Color::Rgb(250, 250, 250),
-            header_fg: Color::Rgb(80, 161, 79),
-            output_text: Color::Rgb(56, 58, 66),
-            output_dim: Color::Rgb(160, 160, 170),
-            output_error: Color::Rgb(228, 86, 73),
-            output_json_key: Color::Rgb(228, 86, 73),
-            output_json_string: Color::Rgb(80, 161, 79),
-            output_json_number: Color::Rgb(152, 104, 1),
-            output_json_bool: Color::Rgb(1, 132, 188),
-            output_json_null: Color::Rgb(160, 160, 170),
-            output_json_brace: Color::Rgb(56, 58, 66),
-            table_header_bg: Color::Rgb(250, 250, 250),
-            table_header_fg: Color::Rgb(152, 104, 1),
-            table_border: Color::Rgb(180, 180, 190),
-            table_row_alt: Color::Rgb(246, 246, 246),
-            input_prefix: Color::Rgb(80, 161, 79),
-            input_text: Color::Rgb(56, 58, 66),
-            input_cursor: Color::Rgb(64, 128, 255),
-            status_bar_bg: Color::Rgb(250, 250, 250),
-            status_bar_fg: Color::Rgb(160, 160, 170),
-            separator: Color::Rgb(180, 180, 190),
-            syntax_keyword: Color::Rgb(152, 84, 144),
-            syntax_function: Color::Rgb(1, 132, 188),
-            syntax_string: Color::Rgb(80, 161, 79),
-            syntax_number: Color::Rgb(152, 104, 1),
-            syntax_operator: Color::Rgb(1, 132, 188),
-            syntax_parameter: Color::Rgb(152, 104, 1),
-            syntax_identifier: Color::Rgb(56, 58, 66),
-            syntax_punctuation: Color::Rgb(160, 160, 170),
-            syntax_bool: Color::Rgb(1, 132, 188),
-            syntax_null: Color::Rgb(160, 160, 170),
-            syntax_comment: Color::Rgb(120, 120, 130),
         }
     }
 
@@ -132,10 +91,6 @@ impl Theme {
         Style::default().fg(self.input_prefix)
     }
 
-    pub fn input_text_style(&self) -> Style {
-        Style::default().fg(self.input_text)
-    }
-
     pub fn input_cursor_style(&self) -> Style {
         Style::default()
             .fg(Color::Black)
@@ -157,10 +112,6 @@ impl Theme {
             .fg(self.table_header_fg)
             .bg(self.table_header_bg)
             .add_modifier(Modifier::BOLD)
-    }
-
-    pub fn table_border_style(&self) -> Style {
-        Style::default().fg(self.table_border)
     }
 
     pub fn separator_style(&self) -> Style {

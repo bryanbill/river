@@ -1,6 +1,8 @@
 use std::fmt;
 use std::ops::Range;
 
+use tracing::warn;
+
 #[derive(Debug, Clone)]
 pub enum Token {
     // Keywords
@@ -297,6 +299,7 @@ impl fmt::Display for Token {
 }
 
 pub struct Lexer<'a> {
+    #[allow(dead_code)]
     input: &'a str,
     chars: Vec<char>,
     pos: usize,
@@ -407,8 +410,8 @@ impl<'a> Lexer<'a> {
         }
 
         // Check for interval suffix
-        if let Some(c) = self.peek() {
-            if c.is_alphabetic() {
+        if let Some(c) = self.peek()
+            && c.is_alphabetic() {
                 let suffix_start = self.pos;
                 let mut suffix = String::new();
                 while let Some(c) = self.peek() {
@@ -432,23 +435,31 @@ impl<'a> Lexer<'a> {
                 };
 
                 if let Some(unit) = interval_unit {
-                    let value: i64 = num_str.replace('_', "").parse().unwrap_or(0);
+                    let value: i64 = num_str.replace('_', "").parse().unwrap_or_else(|e| {
+                        warn!("invalid interval value '{}': {}", num_str, e);
+                        0
+                    });
                     let end = self.pos;
                     return Spanned::new(Token::Interval(value, unit), start..end);
                 }
 
                 self.pos = suffix_start;
             }
-        }
 
         let end = self.pos;
         let clean = num_str.replace('_', "");
 
         if clean.contains('.') {
-            let val: f64 = clean.parse().unwrap_or(0.0);
+            let val: f64 = clean.parse().unwrap_or_else(|e| {
+                warn!("invalid float literal '{}': {}", clean, e);
+                0.0
+            });
             Spanned::new(Token::Float(val), start..end)
         } else {
-            let val: i64 = clean.parse().unwrap_or(0);
+            let val: i64 = clean.parse().unwrap_or_else(|e| {
+                warn!("invalid integer literal '{}': {}", clean, e);
+                0
+            });
             Spanned::new(Token::Integer(val), start..end)
         }
     }
@@ -691,7 +702,7 @@ impl<'a> Lexer<'a> {
                     if self.peek() == Some(':') {
                         self.advance();
                         tokens.push(Spanned::new(Token::CastOp, start..self.pos));
-                    } else if self.peek().map_or(false, |c| c.is_alphabetic() || c == '_') {
+                    } else if self.peek().is_some_and(|c| c.is_alphabetic() || c == '_') {
                         // Named parameter
                         let mut name = String::new();
                         while let Some(c) = self.peek() {

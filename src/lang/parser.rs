@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use chumsky::prelude::*;
 
 use super::ast::*;
@@ -264,13 +266,6 @@ fn call_args(expr: Parser_<Expression>) -> Parser_<Vec<Expression>> {
         .boxed()
 }
 
-fn fn_call(expr: Parser_<Expression>) -> Parser_<Expression> {
-    ident()
-        .then(call_args(expr))
-        .map(|(name, args)| Expression::FnCall { name, args })
-        .boxed()
-}
-
 fn agg_call(expr: Parser_<Expression>) -> Parser_<Expression> {
     let star_agg = choice((
         tok(Token::Count).map(|_| "count".to_string()),
@@ -285,10 +280,10 @@ fn agg_call(expr: Parser_<Expression>) -> Parser_<Expression> {
             .ignore_then(tok(Token::Star).or_not())
             .then_ignore(tok(Token::RParen)),
     )
-    .map(|(name, star)| Expression::Aggregate {
+    .map(|(name, _)| Expression::Aggregate {
         name,
         distinct: false,
-        args: if star.is_some() { vec![] } else { vec![] },
+        args: vec![],
     });
 
     let args_agg = choice((
@@ -349,7 +344,6 @@ fn window_fn_call(expr: Parser_<Expression>) -> Parser_<Expression> {
 
     let func = choice((
         win_ident
-            .clone()
             .try_map(|n: String, s| {
                 if n.to_lowercase() == "row_number" { Ok(n) }
                 else { Err(Simple::custom(s, "expected row_number")) }
@@ -357,7 +351,6 @@ fn window_fn_call(expr: Parser_<Expression>) -> Parser_<Expression> {
             .ignore_then(tok(Token::LParen).ignore_then(tok(Token::RParen)))
             .map(|_| WindowFunction::RowNumber),
         win_ident
-            .clone()
             .try_map(|n: String, s| {
                 if n.to_lowercase() == "rank" { Ok(n) }
                 else { Err(Simple::custom(s, "expected rank")) }
@@ -365,7 +358,6 @@ fn window_fn_call(expr: Parser_<Expression>) -> Parser_<Expression> {
             .ignore_then(tok(Token::LParen).ignore_then(tok(Token::RParen)))
             .map(|_| WindowFunction::Rank),
         win_ident
-            .clone()
             .try_map(|n: String, s| {
                 if n.to_lowercase() == "dense_rank" { Ok(n) }
                 else { Err(Simple::custom(s, "expected dense_rank")) }
@@ -373,7 +365,6 @@ fn window_fn_call(expr: Parser_<Expression>) -> Parser_<Expression> {
             .ignore_then(tok(Token::LParen).ignore_then(tok(Token::RParen)))
             .map(|_| WindowFunction::DenseRank),
         win_ident
-            .clone()
             .try_map(|n: String, s| {
                 if n.to_lowercase() == "lag" { Ok(n) }
                 else { Err(Simple::custom(s, "expected lag")) }
@@ -385,7 +376,6 @@ fn window_fn_call(expr: Parser_<Expression>) -> Parser_<Expression> {
             )
             .map(|(e, o)| WindowFunction::Lag(Box::new(e), o)),
         win_ident
-            .clone()
             .try_map(|n: String, s| {
                 if n.to_lowercase() == "lead" { Ok(n) }
                 else { Err(Simple::custom(s, "expected lead")) }
@@ -397,7 +387,6 @@ fn window_fn_call(expr: Parser_<Expression>) -> Parser_<Expression> {
             )
             .map(|(e, o)| WindowFunction::Lead(Box::new(e), o)),
         win_ident
-            .clone()
             .try_map(|n: String, s| {
                 if n.to_lowercase() == "first_value" { Ok(n) }
                 else { Err(Simple::custom(s, "expected first_value")) }
@@ -616,7 +605,7 @@ fn make_expr_parser(query_p: Parser_<Query>) -> Parser_<Expression> {
         let atom = choice((
             string_raw().map(Expression::String).boxed(),
             float64().map(Expression::Number).boxed(),
-            int64().map(|v| Expression::Integer(v)).boxed(),
+            int64().map(Expression::Integer).boxed(),
             tok(Token::True).map(|_| Expression::Boolean(true)).boxed(),
             tok(Token::False).map(|_| Expression::Boolean(false)).boxed(),
             tok(Token::Null).map(|_| Expression::Null).boxed(),
@@ -859,7 +848,9 @@ fn make_expr_parser(query_p: Parser_<Query>) -> Parser_<Expression> {
         })
         .boxed();
 
-        let or_ = and_.clone().then(
+        
+
+        and_.clone().then(
             tok(Token::Or).ignore_then(and_.clone()).repeated(),
         )
         .foldl(|a, b| Expression::BinaryOp {
@@ -867,9 +858,7 @@ fn make_expr_parser(query_p: Parser_<Query>) -> Parser_<Expression> {
             left: Box::new(a),
             right: Box::new(b),
         })
-        .boxed();
-
-        or_
+        .boxed()
     })
     .boxed()
 }
@@ -1000,17 +989,17 @@ fn resolve_cte_refs_in_statement(stmt: &mut Statement, cte_names: &std::collecti
 
 fn resolve_cte_refs_in_query(query: &mut Query, cte_names: &std::collections::HashSet<String>) {
     for source in &mut query.sources {
-        if let SourceKind::Table(name) = &source.kind {
-            if cte_names.contains(name) {
-                source.kind = SourceKind::CteRef(name.clone());
-            }
+        if let SourceKind::Table(name) = &source.kind
+            && cte_names.contains(name)
+        {
+            source.kind = SourceKind::CteRef(name.clone());
         }
     }
     for join in &mut query.joins {
-        if let SourceKind::Table(name) = &join.source.kind {
-            if cte_names.contains(name) {
-                join.source.kind = SourceKind::CteRef(name.clone());
-            }
+        if let SourceKind::Table(name) = &join.source.kind
+            && cte_names.contains(name)
+        {
+            join.source.kind = SourceKind::CteRef(name.clone());
         }
     }
 }
@@ -1031,13 +1020,7 @@ pub fn parser() -> Parser_<Vec<Statement>> {
         let query_chain = query_p
             .clone()
             .then(set_op_kw.then(query_p.clone()).repeated())
-            .map(|(first, rest)| {
-                if rest.is_empty() {
-                    (first, rest)
-                } else {
-                    (first, rest)
-                }
-            });
+            .map(|(first, rest)| (first, rest));
 
         let cte = ident_or_keyword()
             .then(

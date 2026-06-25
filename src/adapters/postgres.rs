@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -129,7 +127,7 @@ impl DatabaseAdapter for PostgresAdapter {
                 .collect()
         };
 
-        let data: Vec<Vec<Value>> = rows.iter().map(|r| row_to_values(r)).collect();
+        let data: Vec<Vec<Value>> = rows.iter().map(row_to_values).collect();
 
         Ok(QueryResult {
             columns,
