@@ -1,7 +1,8 @@
 use super::planner::{plan_statement, translate_insert_mongo, PlanNode};
 use super::translator::{
-    MSSQLDialect, MySQLDialect, PostgresDialect, SqlDialect, translate_data_type,
-    translate_expr, translate_query, translate_query_mongo, translate_statement_sql,
+    MSSQLDialect, MySQLDialect, PostgresDialect, SqlDialect, translate_alter_table,
+    translate_data_type, translate_expr, translate_query, translate_query_mongo,
+    translate_statement_sql,
 };
 use crate::connection::DatabaseKind;
 use crate::lang::ast::*;
@@ -1114,5 +1115,178 @@ fn plan_insert_mongo_from_statement() {
             assert!(!sql.starts_with("INSERT"), "Expected JSON not SQL: {}", sql);
         }
         other => panic!("Expected Dml plan node, got: {:?}", other),
+    }
+}
+
+// ── ALTER TABLE translator tests ─────────────────────────────────────────────
+
+#[test]
+fn translate_alter_add_column_postgres() {
+    let at = AlterTable {
+        table: "users".into(),
+        connection: None,
+        schema: Some("public".into()),
+        action: AlterAction::AddColumn(ColumnDef {
+            name: "age".into(),
+            data_type: DataType::Integer,
+            nullable: true,
+            default: None,
+            primary_key: false,
+        }),
+    };
+    let sql = translate_alter_table(&at, &PostgresDialect);
+    assert!(sql.contains("ALTER TABLE"), "Missing ALTER TABLE: {}", sql);
+    assert!(sql.contains("ADD COLUMN"), "Missing ADD COLUMN: {}", sql);
+    assert!(sql.contains("\"public\".\"users\""), "Missing table name: {}", sql);
+    assert!(sql.contains("\"age\""), "Missing column name: {}", sql);
+    assert!(sql.contains("INTEGER"), "Missing type: {}", sql);
+}
+
+#[test]
+fn translate_alter_add_column_mysql() {
+    let at = AlterTable {
+        table: "users".into(),
+        connection: None,
+        schema: Some("public".into()),
+        action: AlterAction::AddColumn(ColumnDef {
+            name: "age".into(),
+            data_type: DataType::Integer,
+            nullable: true,
+            default: None,
+            primary_key: false,
+        }),
+    };
+    let sql = translate_alter_table(&at, &MySQLDialect);
+    assert!(sql.contains("`users`"), "Missing backtick table: {}", sql);
+    assert!(sql.contains("`age`"), "Missing backtick column: {}", sql);
+}
+
+#[test]
+fn translate_alter_drop_column_postgres() {
+    let at = AlterTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        action: AlterAction::DropColumn { name: "temp".into() },
+    };
+    let sql = translate_alter_table(&at, &PostgresDialect);
+    assert!(sql.contains("DROP COLUMN"), "Missing DROP COLUMN: {}", sql);
+    assert!(sql.contains("\"temp\""), "Missing column name: {}", sql);
+}
+
+#[test]
+fn translate_alter_rename_column_postgres() {
+    let at = AlterTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        action: AlterAction::RenameColumn { from: "name".into(), to: "full_name".into() },
+    };
+    let sql = translate_alter_table(&at, &PostgresDialect);
+    assert!(sql.contains("RENAME COLUMN"), "Missing RENAME COLUMN: {}", sql);
+    assert!(sql.contains("\"name\""), "Missing from column: {}", sql);
+    assert!(sql.contains("\"full_name\""), "Missing to column: {}", sql);
+}
+
+#[test]
+fn translate_alter_rename_table() {
+    let at = AlterTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        action: AlterAction::RenameTable { to: "customers".into() },
+    };
+    let sql = translate_alter_table(&at, &PostgresDialect);
+    assert!(sql.contains("RENAME TO"), "Missing RENAME TO: {}", sql);
+    assert!(sql.contains("\"customers\""), "Missing new name: {}", sql);
+}
+
+#[test]
+fn translate_alter_not_null_default_postgres() {
+    let at = AlterTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        action: AlterAction::AlterColumn {
+            name: "status".into(),
+            data_type: Some(DataType::String),
+            nullable: Some(false),
+            default: Some(Expression::String("active".into())),
+            drop_default: false,
+        },
+    };
+    let sql = translate_alter_table(&at, &PostgresDialect);
+    assert!(sql.contains("SET NOT NULL"), "Missing SET NOT NULL: {}", sql);
+    assert!(sql.contains("SET DEFAULT"), "Missing SET DEFAULT: {}", sql);
+}
+
+#[test]
+fn translate_alter_drop_default() {
+    let at = AlterTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        action: AlterAction::AlterColumn {
+            name: "status".into(),
+            data_type: None,
+            nullable: None,
+            default: None,
+            drop_default: true,
+        },
+    };
+    let sql = translate_alter_table(&at, &PostgresDialect);
+    assert!(sql.contains("DROP DEFAULT"), "Missing DROP DEFAULT: {}", sql);
+}
+
+#[test]
+fn plan_alter_table() {
+    let at = AlterTable {
+        table: "users".into(),
+        connection: Some("pg".into()),
+        schema: None,
+        action: AlterAction::AddColumn(ColumnDef {
+            name: "bio".into(),
+            data_type: DataType::String,
+            nullable: true,
+            default: None,
+            primary_key: false,
+        }),
+    };
+    let stmt = Statement::AlterTable(at);
+    let source_db = vec![("pg".to_string(), DatabaseKind::Postgres)];
+    let plan = plan_statement(&stmt, &source_db);
+    match &plan.root {
+        PlanNode::AlterTable { database, sql } => {
+            assert_eq!(database.0, "pg");
+            assert_eq!(database.1, DatabaseKind::Postgres);
+            assert!(sql.contains("ADD COLUMN"), "Missing ADD COLUMN: {}", sql);
+        }
+        other => panic!("Expected AlterTable plan node, got: {:?}", other),
+    }
+}
+
+#[test]
+fn plan_alter_table_mongodb_empty() {
+    let at = AlterTable {
+        table: "users".into(),
+        connection: Some("mongo".into()),
+        schema: None,
+        action: AlterAction::AddColumn(ColumnDef {
+            name: "bio".into(),
+            data_type: DataType::String,
+            nullable: true,
+            default: None,
+            primary_key: false,
+        }),
+    };
+    let stmt = Statement::AlterTable(at);
+    let source_db = vec![("mongo".to_string(), DatabaseKind::MongoDB)];
+    let plan = plan_statement(&stmt, &source_db);
+    match &plan.root {
+        PlanNode::AlterTable { database, sql } => {
+            assert_eq!(database.1, DatabaseKind::MongoDB);
+            assert!(sql.is_empty(), "SQL should be empty for MongoDB: {}", sql);
+        }
+        other => panic!("Expected AlterTable plan node, got: {:?}", other),
     }
 }

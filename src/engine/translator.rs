@@ -718,6 +718,160 @@ fn translate_delete_sql(delete: &Delete, dialect: &dyn SqlDialect) -> String {
     query_str
 }
 
+pub fn translate_alter_table(at: &AlterTable, dialect: &dyn SqlDialect) -> String {
+    let table_name = qualify_table(&at.table, at.schema.as_deref(), dialect);
+
+    match &at.action {
+        AlterAction::AddColumn(col) => {
+            let mut def = format!(
+                "{} {}",
+                dialect.quote_ident(&col.name),
+                translate_data_type(&col.data_type, dialect)
+            );
+            if !col.nullable {
+                def.push_str(" NOT NULL");
+            }
+            if let Some(default) = &col.default {
+                def.push_str(&format!(" DEFAULT {}", translate_expr(default, dialect)));
+            }
+            format!("ALTER TABLE {} ADD COLUMN {}", table_name, def)
+        }
+        AlterAction::DropColumn { name } => {
+            format!(
+                "ALTER TABLE {} DROP COLUMN {}",
+                table_name,
+                dialect.quote_ident(name)
+            )
+        }
+        AlterAction::AlterColumn {
+            name,
+            data_type,
+            nullable,
+            default,
+            drop_default,
+        } => {
+            let mut clauses = Vec::new();
+
+            if let Some(dt) = data_type {
+                let type_sql = translate_data_type(dt, dialect);
+                match dialect.kind() {
+                    DatabaseKind::Postgres => {
+                        let col = dialect.quote_ident(name);
+                        // Add USING clause for safe type conversion
+                        clauses.push(format!(
+                            "ALTER COLUMN {col} TYPE {type_sql} USING {col}::{type_sql}"
+                        ));
+                    }
+                    DatabaseKind::MySQL => {
+                        clauses.push(format!(
+                            "MODIFY COLUMN {} {}",
+                            dialect.quote_ident(name),
+                            type_sql
+                        ));
+                    }
+                    DatabaseKind::MSSQL => {
+                        clauses.push(format!(
+                            "ALTER COLUMN {} {}",
+                            dialect.quote_ident(name),
+                            type_sql
+                        ));
+                    }
+                    DatabaseKind::SQLite => {
+                        clauses.push(format!(
+                            "-- ALTER COLUMN TYPE not supported in SQLite"
+                        ));
+                    }
+                    _ => clauses.push(format!(
+                        "ALTER COLUMN {} TYPE {}",
+                        dialect.quote_ident(name),
+                        type_sql
+                    )),
+                }
+            }
+
+            match nullable {
+                Some(true) => match dialect.kind() {
+                    DatabaseKind::MySQL => {
+                        let type_sql = data_type
+                            .as_ref()
+                            .map(|dt| translate_data_type(dt, dialect))
+                            .unwrap_or_else(|| "TEXT".to_string());
+                        clauses.push(format!(
+                            "MODIFY COLUMN {} {} NULL",
+                            dialect.quote_ident(name),
+                            type_sql
+                        ));
+                    }
+                    _ => {
+                        clauses.push(format!(
+                            "ALTER COLUMN {} DROP NOT NULL",
+                            dialect.quote_ident(name)
+                        ));
+                    }
+                },
+                Some(false) => match dialect.kind() {
+                    DatabaseKind::MySQL => {
+                        let type_sql = data_type
+                            .as_ref()
+                            .map(|dt| translate_data_type(dt, dialect))
+                            .unwrap_or_else(|| "TEXT".to_string());
+                        clauses.push(format!(
+                            "MODIFY COLUMN {} {} NOT NULL",
+                            dialect.quote_ident(name),
+                            type_sql
+                        ));
+                    }
+                    _ => {
+                        clauses.push(format!(
+                            "ALTER COLUMN {} SET NOT NULL",
+                            dialect.quote_ident(name)
+                        ));
+                    }
+                },
+                None => {}
+            }
+
+            if *drop_default {
+                clauses.push(format!(
+                    "ALTER COLUMN {} DROP DEFAULT",
+                    dialect.quote_ident(name)
+                ));
+            } else if let Some(expr) = default {
+                clauses.push(format!(
+                    "ALTER COLUMN {} SET DEFAULT {}",
+                    dialect.quote_ident(name),
+                    translate_expr(expr, dialect)
+                ));
+            }
+
+            if dialect.kind() == DatabaseKind::Postgres || dialect.kind() == DatabaseKind::SQLite {
+                format!("ALTER TABLE {} {}", table_name, clauses.join(", "))
+            } else {
+                clauses
+                    .iter()
+                    .map(|c| format!("ALTER TABLE {} {}", table_name, c))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            }
+        }
+        AlterAction::RenameColumn { from, to } => {
+            format!(
+                "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                table_name,
+                dialect.quote_ident(from),
+                dialect.quote_ident(to)
+            )
+        }
+        AlterAction::RenameTable { to } => {
+            format!(
+                "ALTER TABLE {} RENAME TO {}",
+                table_name,
+                dialect.quote_ident(to)
+            )
+        }
+    }
+}
+
 // ── MongoDB translator ──────────────────────────────────────────────────────
 
 fn translate_expr_mongo(expr: &Expression) -> JsonValue {

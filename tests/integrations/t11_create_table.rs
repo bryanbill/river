@@ -1,4 +1,4 @@
-use crate::common::{assert_columns, assert_row_count, execute_river, TestContext};
+use crate::common::{assert_columns, assert_row_count, drop_table_if_exists, execute_river, TestContext};
 use river::adapters::Value;
 
 // ── CREATE TABLE (explicit DDL) ─────────────────────────────────────────────
@@ -195,16 +195,8 @@ async fn persist_query_basic_pg() {
     let ctx = TestContext::new().await;
     let table_name = "t11_test_persist_basic_pg";
 
-    // Pre-cleanup — don't silently ignore errors on second+ runs
-    let cleanup_result = execute_river(&ctx, &format!("remove {}@pg where id > 0", table_name)).await;
-    // First run: table won't exist; second+ runs: should succeed
-    if let Err(e) = &cleanup_result {
-        // Only "relation does not exist" or similar is acceptable
-        let msg = e.to_string();
-        if !msg.contains("does not exist") && !msg.contains("was not found") {
-            panic!("Pre-cleanup failed unexpectedly: {e}");
-        }
-    }
+    // Drop any leftover table from previous runs
+    drop_table_if_exists(&ctx, table_name, "pg").await;
 
     execute_river(
         &ctx,
@@ -219,7 +211,7 @@ async fn persist_query_basic_pg() {
     assert_row_count(&result, 1);
     assert_eq!(result.rows[0][0], Value::Int(10));
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", table_name)).await;
+    drop_table_if_exists(&ctx, table_name, "pg").await;
 }
 
 #[tokio::test]

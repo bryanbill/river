@@ -67,6 +67,20 @@ pub async fn execute_river(ctx: &TestContext, query: &str) -> Result<QueryResult
     execute_statement(&stmt, &ctx.source_db, &ctx.adapters).await
 }
 
+/// Execute raw SQL/JSON directly against an adapter (for cleanup operations like DROP TABLE).
+pub async fn execute_raw(ctx: &TestContext, connection: &str, query: &str) -> Result<QueryResult, RiverError> {
+    let adapter = ctx.adapters.get(connection).ok_or_else(|| {
+        RiverError::Unsupported(format!("no adapter connected for '{}'", connection))
+    })?;
+    adapter.execute(query).await
+}
+
+/// Drop a table if it exists using raw SQL (for test cleanup).
+pub async fn drop_table_if_exists(ctx: &TestContext, table: &str, connection: &str) {
+    let sql = format!("DROP TABLE IF EXISTS \"{}\"", table);
+    let _ = execute_raw(ctx, connection, &sql).await;
+}
+
 // ── Assertion Helpers ─────────────────────────────────────────────────────────
 
 /// Assert that the result has exactly the expected column names (in order).

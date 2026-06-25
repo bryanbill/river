@@ -892,3 +892,189 @@ fn parse_complex_persist() {
         other => panic!("Expected CreateTableAs, got {:?}", other),
     }
 }
+
+// ── ALTER TABLE lexer tests ──────────────────────────────────────────────────
+
+#[test]
+fn lex_alter_table_keywords() {
+    let tokens = lexer::lex("alter add column drop rename to type");
+    let kinds: Vec<_> = tokens.iter().map(|s| &s.token).collect();
+    assert!(kinds.contains(&&Token::Alter));
+    assert!(kinds.contains(&&Token::Add));
+    assert!(kinds.contains(&&Token::Column));
+    assert!(kinds.contains(&&Token::Drop));
+    assert!(kinds.contains(&&Token::Rename));
+    assert!(kinds.contains(&&Token::To));
+    assert!(kinds.contains(&&Token::Type));
+}
+
+#[test]
+fn lex_alter_keywords_as_idents() {
+    // Keywords in column position should still tokenize correctly
+    let tokens = lex_tokens("alter");
+    assert!(!tokens.is_empty());
+}
+
+// ── ALTER TABLE parser tests ─────────────────────────────────────────────────
+
+#[test]
+fn parse_alter_add_column() {
+    let result = parse_one("alter table users add column age int");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::AlterTable(at) => {
+            assert_eq!(at.table, "users");
+            assert!(matches!(&at.action, AlterAction::AddColumn(c) if c.name == "age"));
+        }
+        other => panic!("Expected AlterTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_alter_add_column_not_null_default() {
+    let result = parse_one("alter table users add column status string not null default \"active\"");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::AlterTable(at) => {
+            match &at.action {
+                AlterAction::AddColumn(c) => {
+                    assert_eq!(c.name, "status");
+                    assert!(!c.nullable);
+                    assert!(c.default.is_some());
+                }
+                _ => panic!("Expected AddColumn, got {:?}", at.action),
+            }
+        }
+        other => panic!("Expected AlterTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_alter_drop_column() {
+    let result = parse_one("alter table users drop column age");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::AlterTable(at) => {
+            assert!(matches!(&at.action, AlterAction::DropColumn { name } if name == "age"));
+        }
+        other => panic!("Expected AlterTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_alter_alter_column_type() {
+    let result = parse_one("alter table users alter column age type float");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::AlterTable(at) => {
+            match &at.action {
+                AlterAction::AlterColumn { name, data_type, .. } => {
+                    assert_eq!(name, "age");
+                    assert_eq!(*data_type, Some(DataType::Float));
+                }
+                _ => panic!("Expected AlterColumn, got {:?}", at.action),
+            }
+        }
+        other => panic!("Expected AlterTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_alter_alter_column_not_null() {
+    let result = parse_one("alter table users alter column name not null");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::AlterTable(at) => {
+            match &at.action {
+                AlterAction::AlterColumn { name, nullable, .. } => {
+                    assert_eq!(name, "name");
+                    assert_eq!(*nullable, Some(false));
+                }
+                _ => panic!("Expected AlterColumn, got {:?}", at.action),
+            }
+        }
+        other => panic!("Expected AlterTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_alter_alter_column_drop_default() {
+    let result = parse_one("alter table users alter column name drop default");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::AlterTable(at) => {
+            match &at.action {
+                AlterAction::AlterColumn { name, drop_default, .. } => {
+                    assert_eq!(name, "name");
+                    assert!(*drop_default);
+                }
+                _ => panic!("Expected AlterColumn, got {:?}", at.action),
+            }
+        }
+        other => panic!("Expected AlterTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_alter_rename_column() {
+    let result = parse_one("alter table users rename column name to full_name");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::AlterTable(at) => {
+            assert!(matches!(&at.action, AlterAction::RenameColumn { from, to } if from == "name" && to == "full_name"));
+        }
+        other => panic!("Expected AlterTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_alter_rename_table() {
+    let result = parse_one("alter table users rename to customers");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::AlterTable(at) => {
+            assert!(matches!(&at.action, AlterAction::RenameTable { to } if to == "customers"));
+        }
+        other => panic!("Expected AlterTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_alter_with_schema() {
+    let result = parse_one("alter table public.users add column bio string");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::AlterTable(at) => {
+            assert_eq!(at.schema.as_deref(), Some("public"));
+            assert_eq!(at.table, "users");
+        }
+        other => panic!("Expected AlterTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_alter_with_connection() {
+    let result = parse_one("alter table users@pg drop column temp");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::AlterTable(at) => {
+            assert_eq!(at.connection.as_deref(), Some("pg"));
+            assert_eq!(at.table, "users");
+        }
+        other => panic!("Expected AlterTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_alter_with_schema_and_connection() {
+    let result = parse_one("alter table public.users@pg add column notes string");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::AlterTable(at) => {
+            assert_eq!(at.schema.as_deref(), Some("public"));
+            assert_eq!(at.connection.as_deref(), Some("pg"));
+            assert_eq!(at.table, "users");
+        }
+        other => panic!("Expected AlterTable, got {:?}", other),
+    }
+}
