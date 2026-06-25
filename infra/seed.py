@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 River Database Seed Script
-Generates 10,000 related rows per table across Postgres, MySQL, SQLite, and MongoDB.
+Generates 10,000 related rows per table across Postgres, MySQL, SQLite, MSSQL, and MongoDB.
 
 Tables:
   - users       (10,000) — id, name, email, department, salary, status, is_verified, created_at
@@ -98,7 +98,7 @@ def escape_sql(s):
 
 
 def generate_sql(dialect):
-    """Generate SQL for postgres, mysql, or sqlite."""
+    """Generate SQL for postgres, mysql, sqlite, or mssql."""
     lines = []
 
     if dialect == "postgres":
@@ -107,6 +107,9 @@ def generate_sql(dialect):
     elif dialect == "mysql":
         auto_inc = "INT AUTO_INCREMENT PRIMARY KEY"
         bool_true, bool_false = "TRUE", "FALSE"
+    elif dialect == "mssql":
+        auto_inc = "INT IDENTITY(1,1) PRIMARY KEY"
+        bool_true, bool_false = "1", "0"
     else:  # sqlite
         auto_inc = "INTEGER PRIMARY KEY AUTOINCREMENT"
         bool_true, bool_false = "1", "0"
@@ -114,52 +117,87 @@ def generate_sql(dialect):
     if dialect == "mysql":
         name_type = "VARCHAR(200)"
         status_type = "VARCHAR(50)"
+    elif dialect == "mssql":
+        name_type = "NVARCHAR(256)"
+        status_type = "NVARCHAR(100)"
     else:
         name_type = "TEXT"
         status_type = "TEXT"
+
+    if dialect == "mssql":
+        bool_type = "BIT"
+        timestamp_type = "DATETIME2"
+        timestamp_default = "GETDATE()"
+        decimal_type = "DECIMAL(10,2)"
+        rating_type = "DECIMAL(3,2)"
+    else:
+        bool_type = "BOOLEAN"
+        timestamp_type = "TIMESTAMP"
+        timestamp_default = "CURRENT_TIMESTAMP"
+        decimal_type = "DECIMAL(10,2)"
+        rating_type = "DECIMAL(3,2)"
+
+    if dialect == "mssql":
+        lines.append("IF DB_ID('river') IS NULL CREATE DATABASE river;")
+        lines.append("GO")
+        lines.append("USE river;")
+        lines.append("GO")
+        lines.append("")
 
     lines.append("DROP TABLE IF EXISTS order_items;")
     lines.append("DROP TABLE IF EXISTS orders;")
     lines.append("DROP TABLE IF EXISTS products;")
     lines.append("DROP TABLE IF EXISTS users;")
-    lines.append("")
+
+    if dialect == "mssql":
+        lines.append("GO")
+        lines.append("")
+
     lines.append(f"""CREATE TABLE users (
     id {auto_inc},
     name {name_type} NOT NULL,
     email {name_type} NOT NULL,
     department {status_type},
-    salary DECIMAL(10,2),
+    salary {decimal_type},
     status {status_type} DEFAULT 'active',
-    is_verified BOOLEAN DEFAULT {bool_false},
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    is_verified {bool_type} DEFAULT {bool_false},
+    created_at {timestamp_type} DEFAULT {timestamp_default}
 );""")
+    if dialect == "mssql":
+        lines.append("GO")
     lines.append("")
     lines.append(f"""CREATE TABLE products (
     id {auto_inc},
     name {name_type} NOT NULL,
     category {status_type} NOT NULL,
-    price DECIMAL(10,2) NOT NULL,
+    price {decimal_type} NOT NULL,
     stock INT DEFAULT 0,
-    rating DECIMAL(3,2),
-    is_active BOOLEAN DEFAULT {bool_true},
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    rating {rating_type},
+    is_active {bool_type} DEFAULT {bool_true},
+    created_at {timestamp_type} DEFAULT {timestamp_default}
 );""")
+    if dialect == "mssql":
+        lines.append("GO")
     lines.append("")
     lines.append(f"""CREATE TABLE orders (
     id {auto_inc},
     user_id INT NOT NULL,
     status {status_type} DEFAULT 'pending',
-    total DECIMAL(10,2) DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    total {decimal_type} DEFAULT 0,
+    created_at {timestamp_type} DEFAULT {timestamp_default}
 );""")
+    if dialect == "mssql":
+        lines.append("GO")
     lines.append("")
     lines.append(f"""CREATE TABLE order_items (
     id {auto_inc},
     order_id INT NOT NULL,
     product_id INT NOT NULL,
     quantity INT NOT NULL DEFAULT 1,
-    unit_price DECIMAL(10,2) NOT NULL
+    unit_price {decimal_type} NOT NULL
 );""")
+    if dialect == "mssql":
+        lines.append("GO")
     lines.append("")
 
     # Users
@@ -176,6 +214,8 @@ def generate_sql(dialect):
             f"INSERT INTO users (name, email, department, salary, status, is_verified) VALUES\n"
             + ",\n".join(values) + ";"
         )
+        if dialect == "mssql":
+            lines.append("GO")
 
     lines.append("")
 
@@ -193,6 +233,8 @@ def generate_sql(dialect):
             f"INSERT INTO products (name, category, price, stock, rating, is_active) VALUES\n"
             + ",\n".join(values) + ";"
         )
+        if dialect == "mssql":
+            lines.append("GO")
 
     lines.append("")
 
@@ -207,6 +249,8 @@ def generate_sql(dialect):
             f"INSERT INTO orders (user_id, status, total) VALUES\n"
             + ",\n".join(values) + ";"
         )
+        if dialect == "mssql":
+            lines.append("GO")
 
     lines.append("")
 
@@ -221,6 +265,8 @@ def generate_sql(dialect):
             f"INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES\n"
             + ",\n".join(values) + ";"
         )
+        if dialect == "mssql":
+            lines.append("GO")
 
     # Indexes
     lines.append("")
@@ -231,6 +277,8 @@ def generate_sql(dialect):
     lines.append("CREATE INDEX idx_order_items_order_id ON order_items(order_id);")
     lines.append("CREATE INDEX idx_order_items_product_id ON order_items(product_id);")
     lines.append("CREATE INDEX idx_products_category ON products(category);")
+    if dialect == "mssql":
+        lines.append("GO")
 
     return "\n".join(lines)
 
@@ -329,10 +377,10 @@ def run(cmd, input_data=None, label="", timeout=120):
 
 def main():
     print("=== River Database Seed Script ===")
-    print(f"Generating {ROWS:,} rows per table across 4 databases\n")
+    print(f"Generating {ROWS:,} rows per table across 5 databases\n")
 
     # 1. PostgreSQL
-    print("[1/4] Seeding PostgreSQL...")
+    print("[1/5] Seeding PostgreSQL...")
     pg_sql = generate_sql("postgres")
     ok = run(
         ["docker", "exec", "-i", "infra-postgres-1", "psql", "-U", "river", "-d", "river", "-q"],
@@ -343,7 +391,7 @@ def main():
         print("  ✓ PostgreSQL done")
 
     # 2. MySQL
-    print("[2/4] Seeding MySQL...")
+    print("[2/5] Seeding MySQL...")
     mysql_sql = generate_sql("mysql")
     ok = run(
         ["docker", "exec", "-i", "infra-mysql-1", "mysql", "-uriver", "-priver", "river"],
@@ -354,7 +402,7 @@ def main():
         print("  ✓ MySQL done")
 
     # 3. SQLite
-    print("[3/4] Seeding SQLite...")
+    print("[3/5] Seeding SQLite...")
     sqlite_db = PROJECT_DIR / "river.db"
     sqlite_db.unlink(missing_ok=True)
     sqlite_sql = generate_sql("sqlite")
@@ -366,8 +414,22 @@ def main():
     if ok:
         print(f"  ✓ SQLite done ({sqlite_db})")
 
-    # 4. MongoDB
-    print("[4/4] Seeding MongoDB...")
+    # 4. MSSQL
+    print("[4/5] Seeding MSSQL (SQL Server)...")
+    mssql_sql = generate_sql("mssql")
+    ok = run(
+        ["docker", "exec", "-i", "infra-mssql-1",
+         "/opt/mssql-tools18/bin/sqlcmd",
+         "-S", "localhost", "-U", "sa", "-P", "RiverPass123!", "-C"],
+        input_data=mssql_sql,
+        label="mssql",
+        timeout=300
+    )
+    if ok:
+        print("  ✓ MSSQL done")
+
+    # 5. MongoDB
+    print("[5/5] Seeding MongoDB...")
     mongo_js = generate_mongo_js()
     ok = run(
         ["docker", "exec", "-i", "infra-mongodb-1", "mongosh", "--quiet"],
