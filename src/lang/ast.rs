@@ -1,6 +1,8 @@
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq)]
+use serde::Serialize;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Statement {
     Query(Query),
     Insert(Insert),
@@ -13,6 +15,7 @@ pub enum Statement {
     ShowTables(Option<String>),
     CreateTable(CreateTable),
     CreateTableAs(CreateTableAs),
+    AlterTable(AlterTable),
     ParamAssign {
         name: String,
         value: Expression,
@@ -20,14 +23,14 @@ pub enum Statement {
     Noop,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct With {
     pub recursive: bool,
     pub ctes: Vec<Cte>,
     pub body: Box<Statement>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Cte {
     pub name: String,
     pub columns: Option<Vec<String>>,
@@ -35,14 +38,14 @@ pub struct Cte {
     pub chain: Vec<(SetOpKind, Query)>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SetOp {
     pub kind: SetOpKind,
     pub left: Box<Query>,
     pub right: Box<Query>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum SetOpKind {
     Union,
     UnionAll,
@@ -50,7 +53,7 @@ pub enum SetOpKind {
     Except,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[derive(Default)]
 pub struct Query {
     pub distinct: bool,
@@ -67,14 +70,14 @@ pub struct Query {
 }
 
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Projection {
     Wildcard,
     QualifiedWildcard(String),
     Expr(Expression, Option<String>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Join {
     pub kind: JoinKind,
     pub source: Source,
@@ -82,7 +85,7 @@ pub struct Join {
     pub condition: Option<Expression>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum JoinKind {
     Inner,
     Left,
@@ -91,7 +94,7 @@ pub enum JoinKind {
     Cross,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Source {
     pub name: String,
     pub alias: Option<String>,
@@ -100,26 +103,26 @@ pub struct Source {
     pub kind: SourceKind,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum SourceKind {
     Table(String),
     Subquery(Box<Query>),
     CteRef(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WindowDef {
     pub name: String,
     pub spec: WindowSpec,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WindowSpec {
     pub partition_by: Vec<Expression>,
     pub order_by: Vec<OrderBy>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum WindowFunction {
     RowNumber,
     Rank,
@@ -133,27 +136,27 @@ pub enum WindowFunction {
     Expr(Box<Expression>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct OrderBy {
     pub expr: Expression,
     pub direction: OrderDir,
     pub nulls: NullsOrder,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum OrderDir {
     Asc,
     Desc,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum NullsOrder {
     Default,
     First,
     Last,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Expression {
     String(String),
     Number(f64),
@@ -281,7 +284,7 @@ impl PartialEq for Expression {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -303,20 +306,20 @@ pub enum BinaryOp {
     Concat,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum UnaryOp {
     Neg,
     Not,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Quantifier {
     All,
     Any,
     Some,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum IntervalUnit {
     Year,
     Month,
@@ -341,7 +344,7 @@ impl fmt::Display for IntervalUnit {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum DataType {
     String,
     Integer,
@@ -351,7 +354,7 @@ pub enum DataType {
     Json,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Insert {
     pub table: String,
     pub connection: Option<String>,
@@ -361,7 +364,7 @@ pub struct Insert {
     pub query: Option<Box<Query>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Update {
     pub table: String,
     pub connection: Option<String>,
@@ -370,7 +373,7 @@ pub struct Update {
     pub filter: Option<Expression>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Delete {
     pub table: String,
     pub connection: Option<String>,
@@ -378,14 +381,14 @@ pub struct Delete {
     pub filter: Option<Expression>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Describe {
     pub table: String,
     pub connection: Option<String>,
     pub schema: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ColumnDef {
     pub name: String,
     pub data_type: DataType,
@@ -394,7 +397,37 @@ pub struct ColumnDef {
     pub primary_key: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum AlterAction {
+    AddColumn(ColumnDef),
+    DropColumn {
+        name: String,
+    },
+    AlterColumn {
+        name: String,
+        data_type: Option<DataType>,
+        nullable: Option<bool>,
+        default: Option<Expression>,
+        drop_default: bool,
+    },
+    RenameColumn {
+        from: String,
+        to: String,
+    },
+    RenameTable {
+        to: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AlterTable {
+    pub table: String,
+    pub connection: Option<String>,
+    pub schema: Option<String>,
+    pub action: AlterAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CreateTable {
     pub table: String,
     pub connection: Option<String>,
@@ -403,13 +436,13 @@ pub struct CreateTable {
     pub if_not_exists: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ConflictAction {
     Ignore,
     Replace,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CreateTableAs {
     pub query: Box<Query>,
     pub table: String,

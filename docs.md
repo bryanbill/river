@@ -1228,6 +1228,39 @@ create table if not exists cache (
 )
 ```
 
+### ALTER TABLE
+
+Modify an existing table's structure:
+
+```sql
+-- Add a new column
+alter table users add column bio string
+
+-- Add a non-null column with default
+alter table users add column tier string not null default "free"
+
+-- Drop a column
+alter table users drop column temp_data
+
+-- Change a column's type
+alter table users alter column age type float
+
+-- Set not null + default
+alter table users alter column status type string not null default "active"
+
+-- Drop a default constraint
+alter table users alter column status drop default
+
+-- Rename a column
+alter table users rename column name to full_name
+
+-- Rename a table
+alter table users rename to customers
+
+-- On a specific connection
+alter table users@pg add column notes string
+```
+
 ### Persisting Query Results — `>>`
 
 Save the results of any query to a table using `>>`:
@@ -1264,6 +1297,11 @@ insert if exists on conflict ignore
 | Insert from query       | `create table (find ...)`                      | `INSERT INTO table SELECT ...`    |
 | Persist query results   | `find ... >> target`                           | `CREATE TABLE AS ... + INSERT`    |
 | Persist with upsert     | `find ... >> target insert if exists on conflict replace` | `ON CONFLICT DO UPDATE` |
+| Add column              | `alter table t add column col type ...`        | `ALTER TABLE t ADD COLUMN ...`    |
+| Drop column             | `alter table t drop column col`                | `ALTER TABLE t DROP COLUMN col`   |
+| Alter column type       | `alter table t alter column col type ...`      | `ALTER TABLE t ALTER COLUMN ...`  |
+| Rename column           | `alter table t rename column col to new`       | `ALTER TABLE t RENAME COLUMN ...` |
+| Rename table            | `alter table t rename to new`                  | `ALTER TABLE t RENAME TO ...`     |
 | Update                  | `update table set ... where ...`               | `UPDATE table SET ... WHERE ...`  |
 | Delete                  | `remove table where ...`                       | `DELETE FROM table WHERE ...`     |
 
@@ -1416,6 +1454,13 @@ limit N offset M
 | `update` / `set`                          | UPDATE                   |
 | `remove`                                  | DELETE                   |
 | `explain`                                 | Show query plan          |
+| `alter`                                   | ALTER TABLE              |
+| `add`                                     | ALTER TABLE ADD COLUMN   |
+| `column`                                  | ALTER TABLE column ref   |
+| `drop`                                    | ALTER TABLE DROP COLUMN  |
+| `rename`                                  | ALTER TABLE RENAME       |
+| `to`                                      | ALTER TABLE RENAME TO    |
+| `type`                                    | ALTER COLUMN TYPE        |
 | `describe`                                | Show table schema        |
 | `show tables`                             | List tables              |
 
