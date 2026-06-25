@@ -17,6 +17,7 @@ mod t08_data_modification;
 mod t09_meta_commands;
 mod t10_schema;
 mod t11_create_table;
+mod t12_is_null;
 
 #[path = "../common/mod.rs"]
 mod common;

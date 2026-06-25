@@ -28,18 +28,18 @@ services:
       interval: 3s
       retries: 10
 
-  # mssql:
-  #   image: mcr.microsoft.com/mssql/server:2022-latest
-  #   platform: linux/amd64
-  #   environment:
-  #     ACCEPT_EULA: "Y"
-  #     MSSQL_SA_PASSWORD: "RiverPass123!"
-  #   ports:
-  #     - "1433:1433"
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'RiverPass123!' -C -Q 'SELECT 1'"]
-  #     interval: 5s
-  #     retries: 20
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "RiverPass123!"
+    ports:
+      - "1433:1433"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'RiverPass123!' -C -Q 'SELECT 1'"]
+      interval: 5s
+      retries: 20
 
   mongodb:
     image: mongo:8
