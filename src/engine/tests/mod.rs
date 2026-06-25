@@ -255,7 +255,39 @@ fn translate_boolean_null_literals() {
     let sql = translate_query(&q, &dialect);
     assert_eq!(
         sql,
-        r#"SELECT * FROM "users" WHERE (("active" = TRUE) AND ("deleted_at" <> NULL))"#
+        r#"SELECT * FROM "users" WHERE (("active" = TRUE) AND "deleted_at" IS NOT NULL)"#
+    );
+}
+
+#[test]
+fn translate_is_null_postgres() {
+    let filter = Expression::BinaryOp {
+        op: BinaryOp::Eq,
+        left: Box::new(Expression::Ident("deleted_at".into())),
+        right: Box::new(Expression::Null),
+    };
+    let q = make_query(vec![], vec![table_source("users")], Some(filter));
+    let dialect = PostgresDialect;
+    let sql = translate_query(&q, &dialect);
+    assert_eq!(
+        sql,
+        r#"SELECT * FROM "users" WHERE "deleted_at" IS NULL"#
+    );
+}
+
+#[test]
+fn translate_is_not_null_mysql() {
+    let filter = Expression::BinaryOp {
+        op: BinaryOp::Neq,
+        left: Box::new(Expression::Ident("email_verified".into())),
+        right: Box::new(Expression::Null),
+    };
+    let q = make_query(vec![], vec![table_source("users")], Some(filter));
+    let dialect = MySQLDialect;
+    let sql = translate_query(&q, &dialect);
+    assert_eq!(
+        sql,
+        "SELECT * FROM `users` WHERE `email_verified` IS NOT NULL"
     );
 }
 

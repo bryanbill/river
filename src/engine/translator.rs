@@ -292,6 +292,12 @@ fn translate_binary_sql(
                 format!("{} LIKE {}", left_s, right_s)
             }
         }
+        BinaryOp::Eq if matches!(right, Expression::Null) => {
+            format!("{} IS NULL", left_s)
+        }
+        BinaryOp::Neq if matches!(right, Expression::Null) => {
+            format!("{} IS NOT NULL", left_s)
+        }
         _ => {
             let op_str = op_to_sql(op);
             format!("({} {} {})", left_s, op_str, right_s)
