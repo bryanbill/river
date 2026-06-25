@@ -51,6 +51,7 @@ pub enum SetOpKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub struct Query {
     pub distinct: bool,
     pub projection: Vec<Projection>,
@@ -65,23 +66,6 @@ pub struct Query {
     pub offset: Option<u64>,
 }
 
-impl Default for Query {
-    fn default() -> Self {
-        Self {
-            distinct: false,
-            projection: Vec::new(),
-            sources: Vec::new(),
-            joins: Vec::new(),
-            filter: None,
-            group_by: Vec::new(),
-            having: None,
-            window_defs: Vec::new(),
-            order_by: Vec::new(),
-            limit: None,
-            offset: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Projection {

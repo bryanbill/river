@@ -86,7 +86,7 @@ fn highlight_token_kind_classification() {
         TokenKind::String
     );
     assert_eq!(highlight::token_kind(&Token::Integer(42)), TokenKind::Number);
-    assert_eq!(highlight::token_kind(&Token::Float(3.14)), TokenKind::Number);
+    assert_eq!(highlight::token_kind(&Token::Float(std::f64::consts::PI)), TokenKind::Number);
     assert_eq!(highlight::token_kind(&Token::True), TokenKind::Bool);
     assert_eq!(highlight::token_kind(&Token::Null), TokenKind::Null);
     assert_eq!(highlight::token_kind(&Token::Eq), TokenKind::Operator);

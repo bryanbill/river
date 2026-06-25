@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod ast;
 pub mod lexer;
 pub mod parser;
@@ -96,6 +94,7 @@ pub fn parse(input: &str) -> Result<ast::Statement, RiverError> {
     Ok(stmts.into_iter().next().unwrap_or(ast::Statement::Noop))
 }
 
+#[allow(dead_code)]
 pub fn parse_all(input: &str) -> Result<Vec<ast::Statement>, RiverError> {
     let tokens: Vec<(lexer::Token, Span)> = lexer::lex(input)
         .into_iter()

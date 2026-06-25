@@ -1,7 +1,7 @@
-#![allow(dead_code)]
-
 use serde_json::json;
 use serde_json::Value as JsonValue;
+
+use tracing::warn;
 
 use crate::adapters::Value;
 use crate::connection::DatabaseKind;
@@ -444,7 +444,7 @@ fn translate_order_by_sql(order: &OrderBy, dialect: &dyn SqlDialect) -> String {
         NullsOrder::First => " NULLS FIRST".to_string(),
         NullsOrder::Last => " NULLS LAST".to_string(),
     };
-    format!("{}{}{}", translate_expr(&order.expr, dialect), format!(" {}", dir), nulls)
+    format!("{} {}{}", translate_expr(&order.expr, dialect), dir, nulls)
 }
 
 fn translate_projection_sql(proj: &Projection, dialect: &dyn SqlDialect) -> String {
@@ -589,7 +589,7 @@ pub fn translate_statement_sql(stmt: &Statement, dialect: &dyn SqlDialect) -> St
         Statement::Delete(delete) => translate_delete_sql(delete, dialect),
         Statement::CreateTable(ct) => translate_create_table(ct, dialect),
         Statement::Noop => String::new(),
-        _ => format!("-- unsupported statement type"),
+        _ => "-- unsupported statement type".to_string(),
     }
 }
 
@@ -817,9 +817,13 @@ fn translate_expr_mongo(expr: &Expression) -> JsonValue {
             let field = translate_expr_mongo(expr);
             let low_val = translate_expr_mongo(low);
             let high_val = translate_expr_mongo(high);
+            let f = field.as_str().unwrap_or_else(|| {
+                warn!("BETWEEN expression generated non-string field: {:?}", field);
+                ""
+            });
             json!({"$and": [
-                {field.as_str().unwrap_or(""): {"$gte": low_val}},
-                {field.as_str().unwrap_or(""): {"$lte": high_val}}
+                {f: {"$gte": low_val}},
+                {f: {"$lte": high_val}}
             ]})
         }
         Expression::Subquery(_) => {
@@ -981,7 +985,7 @@ pub fn translate_query_mongo(query: &Query, database: &str) -> JsonValue {
                 let group_keys: Vec<JsonValue> = query
                     .group_by
                     .iter()
-                    .map(|e| translate_expr_mongo(e))
+                    .map(translate_expr_mongo)
                     .collect();
                 if group_keys.len() == 1 {
                     group_spec.insert("_id".to_string(), group_keys.into_iter().next().unwrap());

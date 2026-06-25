@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -14,7 +12,10 @@ use super::{ColumnInfo, DatabaseAdapter, QueryResult, TableInfo, TableSchema, Va
 use crate::connection::{ConnectionConfig, DatabaseKind};
 use crate::error::RiverError;
 
+use tracing::warn;
+
 pub struct MssqlAdapter {
+    config_uri: String,
     client: Arc<Mutex<Client<Compat<TcpStream>>>>,
 }
 
@@ -90,11 +91,35 @@ fn row_to_values(row: &tiberius::Row, col_count: usize) -> Vec<Value> {
     values
 }
 
+async fn execute_stream(
+    client: &mut Client<Compat<TcpStream>>,
+    query: &str,
+) -> Result<(Vec<String>, Vec<Vec<Value>>, u64), RiverError> {
+    let mut stream = client.query(query, &[]).await?;
+
+    let cols = stream.columns().await?;
+    let columns: Vec<String> = cols
+        .map(|c| c.iter().map(|col| col.name().to_string()).collect())
+        .unwrap_or_default();
+    let col_count = columns.len();
+
+    let row_stream = stream.into_row_stream();
+    futures::pin_mut!(row_stream);
+
+    let mut rows = Vec::new();
+    while let Some(row) = row_stream.try_next().await? {
+        rows.push(row_to_values(&row, col_count));
+    }
+
+    Ok((columns, rows, col_count as u64))
+}
+
 #[async_trait]
 impl DatabaseAdapter for MssqlAdapter {
     async fn connect(config: &ConnectionConfig) -> Result<Self, RiverError> {
         let client = connect_client(&config.uri).await?;
         Ok(Self {
+            config_uri: config.uri.clone(),
             client: Arc::new(Mutex::new(client)),
         })
     }
@@ -105,35 +130,38 @@ impl DatabaseAdapter for MssqlAdapter {
 
     async fn execute(&self, query: &str) -> Result<QueryResult, RiverError> {
         let start = Instant::now();
-        let mut client = self.client.lock().await;
 
-        let mut stream = client.query(query, &[]).await?;
-        let cols = stream.columns().await?;
-        let columns: Vec<String> = cols
-            .map(|c| c.iter().map(|col| col.name().to_string()).collect())
-            .unwrap_or_default();
-        let col_count = columns.len();
+        let mut guard = self.client.lock().await;
 
-        let row_stream = stream.into_row_stream();
-        futures::pin_mut!(row_stream);
-
-        let mut rows = Vec::new();
-        while let Some(row) = row_stream.try_next().await? {
-            rows.push(row_to_values(&row, col_count));
-        }
+        // Attempt query with reconnection on transport failure
+        let (columns, rows, rows_affected) =
+            match execute_stream(&mut guard, query).await {
+                Ok(result) => result,
+                Err(first_err) => {
+                    // Transport error — drop lock, reconnect, retry
+                    drop(guard);
+                    warn!(
+                        "MSSQL query failed, attempting reconnection: {}",
+                        first_err
+                    );
+                    let new_client = connect_client(&self.config_uri).await?;
+                    let mut guard = self.client.lock().await;
+                    *guard = new_client;
+                    execute_stream(&mut guard, query).await?
+                }
+            };
 
         let elapsed = start.elapsed();
 
         Ok(QueryResult {
             columns,
-            rows_affected: rows.len() as u64,
+            rows_affected,
             rows,
             elapsed,
         })
     }
 
     async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<TableInfo>, RiverError> {
-        let mut client = self.client.lock().await;
         let schema_filter = schema
             .map(|s| format!(" AND TABLE_SCHEMA = '{}'", s.replace('\'', "''")))
             .unwrap_or_default();
@@ -143,19 +171,16 @@ impl DatabaseAdapter for MssqlAdapter {
              ORDER BY TABLE_SCHEMA, TABLE_NAME",
             schema_filter
         );
-        let stream = client.query(&query, &[]).await?;
-
-        let row_stream = stream.into_row_stream();
-        futures::pin_mut!(row_stream);
+        let mut guard = self.client.lock().await;
+        let (_, rows, _) = execute_stream(&mut guard, &query).await?;
 
         let mut tables = Vec::new();
-        while let Some(row) = row_stream.try_next().await? {
-            let values = row_to_values(&row, 2);
-            let schema = match values.first() {
+        for row in &rows {
+            let schema = match row.first() {
                 Some(Value::String(s)) => Some(s.clone()),
                 _ => None,
             };
-            let name = match values.get(1) {
+            let name = match row.get(1) {
                 Some(Value::String(n)) => n.clone(),
                 _ => continue,
             };
@@ -165,8 +190,11 @@ impl DatabaseAdapter for MssqlAdapter {
         Ok(tables)
     }
 
-    async fn describe_table(&self, table: &str, schema: Option<&str>) -> Result<TableSchema, RiverError> {
-        let mut client = self.client.lock().await;
+    async fn describe_table(
+        &self,
+        table: &str,
+        schema: Option<&str>,
+    ) -> Result<TableSchema, RiverError> {
         let schema_filter = schema
             .map(|s| format!(" AND TABLE_SCHEMA = '{}'", s.replace('\'', "''")))
             .unwrap_or_default();
@@ -177,23 +205,20 @@ impl DatabaseAdapter for MssqlAdapter {
             table.replace('\'', "''"),
             schema_filter
         );
-        let stream = client.query(&query, &[]).await?;
-
-        let row_stream = stream.into_row_stream();
-        futures::pin_mut!(row_stream);
+        let mut guard = self.client.lock().await;
+        let (_, rows, _) = execute_stream(&mut guard, &query).await?;
 
         let mut columns = Vec::new();
-        while let Some(row) = row_stream.try_next().await? {
-            let values = row_to_values(&row, 3);
-            let name = match values.first() {
+        for row in &rows {
+            let name = match row.first() {
                 Some(Value::String(n)) => n.clone(),
                 _ => continue,
             };
-            let data_type = match values.get(1) {
+            let data_type = match row.get(1) {
                 Some(Value::String(t)) => t.clone(),
                 _ => String::new(),
             };
-            let nullable = match values.get(2) {
+            let nullable = match row.get(2) {
                 Some(Value::String(n)) => n == "YES",
                 _ => true,
             };

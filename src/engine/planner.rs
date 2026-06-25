@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::connection::DatabaseKind;
 use crate::lang::ast::*;
 
@@ -9,6 +7,7 @@ pub const CROSS_DB_BATCH_SIZE: usize = 1000;
 pub enum JoinStrategy {
     NestedLoop,
     Hash,
+    #[allow(dead_code)]
     Merge,
     Auto,
 }
@@ -54,6 +53,7 @@ pub enum PlanNode {
         input: Box<PlanNode>,
         condition: Expression,
     },
+    #[allow(dead_code)]
     Union {
         left: Box<PlanNode>,
         right: Box<PlanNode>,
@@ -61,7 +61,7 @@ pub enum PlanNode {
     },
     SemiJoinFetch {
         build: Box<PlanNode>,
-        probe_source: Source,
+        probe_source: Box<Source>,
         probe_database: (String, DatabaseKind),
         build_key: Expression,
         probe_key: Expression,
@@ -255,7 +255,7 @@ pub fn plan_query(query: &Query, source_db: &[(String, DatabaseKind)]) -> QueryP
 
                     root = PlanNode::SemiJoinFetch {
                         build: Box::new(root),
-                        probe_source,
+                        probe_source: Box::new(probe_source),
                         probe_database,
                         build_key,
                         probe_key,
@@ -749,7 +749,7 @@ fn format_node(node: &PlanNode, lines: &mut Vec<String>, prefix: String, is_last
             format_node(input, lines, child_prefix, true);
         }
         PlanNode::Aggregate { input, group_by, aggs, having } => {
-            let groups: Vec<String> = group_by.iter().map(|e| expr_str(e)).collect();
+            let groups: Vec<String> = group_by.iter().map(expr_str).collect();
             let agg_strs: Vec<String> = aggs
                 .iter()
                 .map(|(e, alias)| {
@@ -930,7 +930,7 @@ fn expr_str(expr: &crate::lang::ast::Expression) -> String {
             format!("{op_str}({})", expr_str(e))
         }
         crate::lang::ast::Expression::FnCall { name, args } => {
-            let args_str: Vec<String> = args.iter().map(|a| expr_str(a)).collect();
+            let args_str: Vec<String> = args.iter().map(expr_str).collect();
             format!("{name}({})", args_str.join(", "))
         }
         crate::lang::ast::Expression::Aggregate { name, distinct, args } => {
@@ -938,7 +938,7 @@ fn expr_str(expr: &crate::lang::ast::Expression) -> String {
             if args.is_empty() {
                 format!("{name}({distinct_str}*)")
             } else {
-                let args_str: Vec<String> = args.iter().map(|a| expr_str(a)).collect();
+                let args_str: Vec<String> = args.iter().map(expr_str).collect();
                 format!("{name}({distinct_str}{})", args_str.join(", "))
             }
         }

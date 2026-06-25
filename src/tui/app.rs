@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -7,7 +5,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 
 use crate::adapters::DatabaseAdapter;
-use crate::connection::{ConnectionConfig, DatabaseKind};
+use crate::connection::DatabaseKind;
 use crate::engine::planner;
 use crate::engine::executor;
 use crate::lang::{self, ast::Statement};
@@ -30,7 +28,6 @@ pub struct QuerySession {
 }
 
 pub struct App {
-    pub connections: Vec<ConnectionConfig>,
     pub adapters: HashMap<String, Box<dyn DatabaseAdapter>>,
     pub source_db: Vec<(String, DatabaseKind)>,
     pub input: InputState,
@@ -45,12 +42,10 @@ pub struct App {
     pub session_idx: usize,
 }
 
-const HISTORY_PATH: &str = "history.txt";
 const MAX_HISTORY: usize = 1000;
 
 impl App {
     pub fn new(
-        connections: Vec<ConnectionConfig>,
         adapters: HashMap<String, Box<dyn DatabaseAdapter>>,
         source_db: Vec<(String, DatabaseKind)>,
         conn_errors: Vec<String>,
@@ -59,7 +54,7 @@ impl App {
 
         load_history(&mut input);
 
-        let active_connection = connections.first().map(|c| c.name.clone());
+        let active_connection = source_db.first().map(|(name, _)| name.clone());
 
         let mut output = OutputBuffer::new(10_000);
 
@@ -88,7 +83,6 @@ impl App {
         }];
 
         Self {
-            connections,
             adapters,
             source_db,
             input,

@@ -382,7 +382,7 @@ fn looks_like_bool(chars: &[char], i: usize) -> bool {
 fn looks_like_null(chars: &[char], i: usize) -> bool {
     chars
         .get(i..)
-        .map_or(false, |s| s.len() >= 4 && s[0] == 'n' && s[1] == 'u' && s[2] == 'l' && s[3] == 'l')
+        .is_some_and(|s| s.len() >= 4 && s[0] == 'n' && s[1] == 'u' && s[2] == 'l' && s[3] == 'l')
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -425,8 +425,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         )));
     }
 
-    for line_idx in view_offset..view_end {
-        let line_text = all_lines[line_idx];
+    for (line_idx, line_text) in all_lines.iter().enumerate().skip(view_offset).take(view_end - view_offset) {
         let line_start = highlight::line_start_byte(&app.input.text, line_idx);
 
         let is_cursor_line = line_idx == cursor_line;

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub mod mssql;
 pub mod mysql;
 pub mod postgres;
@@ -76,6 +74,7 @@ pub struct ColumnInfo {
 
 #[derive(Debug, Clone)]
 pub struct TableSchema {
+    #[allow(dead_code)]
     pub name: String,
     pub columns: Vec<ColumnInfo>,
 }
@@ -101,6 +100,7 @@ pub trait DatabaseAdapter: Send + Sync {
     async fn describe_table(&self, table: &str, schema: Option<&str>) -> Result<TableSchema, RiverError>;
 
     /// Return which database dialect this adapter speaks.
+    #[allow(dead_code)]
     fn dialect(&self) -> DatabaseKind;
 }
 

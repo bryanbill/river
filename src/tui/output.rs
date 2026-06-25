@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 
 pub const MAX_TABLE_DISPLAY_ROWS: usize = 50;
@@ -11,6 +9,7 @@ pub enum OutputLine {
         rows: Vec<Vec<String>>,
         row_offset: usize,
     },
+    #[allow(dead_code)]
     Json(String),
     Error(String),
     Info(String),
@@ -99,22 +98,6 @@ impl OutputBuffer {
         self.lines.push_back(line);
     }
 
-    pub fn len(&self) -> usize {
-        self.lines.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &OutputLine> {
-        self.lines.iter()
-    }
-
-    pub fn scroll_offset(&self) -> usize {
-        self.scroll_offset
-    }
-
     fn total_visual_lines(&self) -> usize {
         self.lines.iter().map(|l| l.visual_height()).sum()
     }
@@ -168,12 +151,6 @@ impl OutputBuffer {
             let max_offset = total.saturating_sub(display);
             let new_offset = (current + amount).min(max_offset);
             table.set_row_offset(new_offset);
-        }
-    }
-
-    pub fn reset_last_table_scroll(&mut self) {
-        if let Some(table) = self.last_table_mut() {
-            table.set_row_offset(0);
         }
     }
 

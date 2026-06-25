@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -9,6 +7,8 @@ use crate::engine::planner::{JoinStrategy, PlanNode, QueryPlan};
 use crate::engine::translator::*;
 use crate::lang::ast::*;
 use crate::error::RiverError;
+
+use tracing::warn;
 
 pub async fn execute_plan(
     plan: &QueryPlan,
@@ -77,14 +77,13 @@ pub async fn execute_statement(
 fn replace_cte_scans(node: &mut PlanNode, cte_data: &HashMap<String, QueryResult>) {
     match node {
         PlanNode::Scan { source, database, .. } if database.is_none() => {
-            if let SourceKind::CteRef(name) = &source.kind {
-                if let Some(data) = cte_data.get(name) {
+            if let SourceKind::CteRef(name) = &source.kind
+                && let Some(data) = cte_data.get(name) {
                     *node = PlanNode::InlineData {
                         columns: data.columns.clone(),
                         rows: data.rows.clone(),
                     };
                 }
-            }
         }
         PlanNode::Filter { input, .. }
         | PlanNode::Project { input, .. }
@@ -138,7 +137,12 @@ fn translate_for_kind(query: &Query, kind: &DatabaseKind) -> String {
         DatabaseKind::MongoDB => {
             // Pass an empty string as the database name; the MongoAdapter will
             // use its default_db (derived from the connection URI) as fallback.
-            serde_json::to_string(&translate_query_mongo(query, "")).unwrap_or_default()
+            serde_json::to_string(&translate_query_mongo(query, ""))
+                .map_err(|e| {
+                    warn!("failed to serialize MongoDB query: {}", e);
+                    e
+                })
+                .unwrap_or_default()
         }
     }
 }
@@ -269,21 +273,42 @@ async fn execute_node(
             {
                 let left_db = find_single_db(left);
                 let right_db = find_single_db(right);
-                if let (Some((ln, _)), Some((rn, _))) = (&left_db, &right_db) {
-                    if ln != rn {
+                if let (Some((ln, _)), Some((rn, _))) = (&left_db, &right_db)
+                    && ln != rn {
                         return Err(RiverError::Unsupported(
                             "Cross-database cross joins require a LIMIT clause to prevent \
                              unbounded result sets. Add 'limit N' to your query."
                                 .into(),
                         ));
                     }
-                }
             }
-            let left_fut = Box::pin(execute_node(left, adapters, bounded));
-            let right_fut = Box::pin(execute_node(right, adapters, bounded));
-            let (lr, rr) = tokio::join!(left_fut, right_fut);
-            let left_result = lr?;
-            let right_result = rr?;
+
+            // For cross-DB cross joins with a LIMIT, push the limit down to the
+            // right-side database query to avoid materializing large tables in memory.
+            let is_cross_db_join = {
+                let ldb = find_single_db(left);
+                let rdb = find_single_db(right);
+                ldb.as_ref().zip(rdb.as_ref())
+                    .is_some_and(|((ln, _), (rn, _))| ln != rn)
+            };
+            let right_result = if *join_kind == JoinKind::Cross
+                && limit.is_some()
+                && is_cross_db_join
+            {
+                if let Some((rdb_name, rdb_kind, mut rquery)) =
+                    collect_single_db_query(right)
+                {
+                    rquery.limit = *limit;
+                    rquery.offset = Some(0);
+                    execute_on_db(&rdb_name, &rdb_kind, &rquery, adapters).await?
+                } else {
+                    Box::pin(execute_node(right, adapters, true)).await?
+                }
+            } else {
+                Box::pin(execute_node(right, adapters, bounded)).await?
+            };
+
+            let left_result = Box::pin(execute_node(left, adapters, bounded)).await?;
             join_results(left_result, right_result, condition, strategy, *join_kind, *limit)
         }
         PlanNode::Filter { input, condition } => {
@@ -360,7 +385,7 @@ async fn execute_node(
             let adapter = adapters.get(&database.0).ok_or_else(|| {
                 RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
             })?;
-            let table_schema = adapter.describe_table(&table, schema.as_deref()).await?;
+            let table_schema = adapter.describe_table(table, schema.as_deref()).await?;
             let rows: Vec<Vec<Value>> = table_schema
                 .columns
                 .into_iter()
@@ -451,7 +476,8 @@ async fn execute_node(
                     };
                     payload.insert("on_conflict".into(), serde_json::json!(action_str));
                 }
-                let json = serde_json::to_string(&payload).unwrap_or_default();
+                let json = serde_json::to_string(&payload)
+                    .map_err(|e| RiverError::Other(anyhow::anyhow!("failed to serialize insert payload: {}", e)))?;
                 adapter.execute(&json).await
             } else {
                 let column_types =
@@ -489,6 +515,7 @@ async fn execute_node(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_semi_join_fetch(
     build: &PlanNode,
     probe_source: &Source,
@@ -573,7 +600,8 @@ async fn execute_semi_join_fetch(
                 let pipeline = crate::engine::translator::build_probe_query_mongo(
                     &table_name, &probe_key_col, chunk, "",
                 );
-                serde_json::to_string(&pipeline).unwrap_or_default()
+                serde_json::to_string(&pipeline)
+                    .map_err(|e| RiverError::Other(anyhow::anyhow!("failed to serialize MongoDB probe query: {}", e)))?
             }
             _ => {
                 let dialect: Box<dyn crate::engine::translator::SqlDialect> = match db_kind {
@@ -814,11 +842,10 @@ fn nested_loop_join(
         'outer: for l_row in &left.rows {
             for r_row in &right.rows {
                 rows.push(merge_vals(l_row, r_row));
-                if let Some(lim) = limit {
-                    if rows.len() >= lim as usize {
+                if let Some(lim) = limit
+                    && rows.len() >= lim as usize {
                         break 'outer;
                     }
-                }
             }
         }
         return Ok(QueryResult {
@@ -840,8 +867,8 @@ fn nested_loop_join(
                 left_matched[li] = true;
                 right_matched[ri] = true;
             }
-            if let Some(lim) = limit {
-                if rows.len() >= lim as usize {
+            if let Some(lim) = limit
+                && rows.len() >= lim as usize {
                     return Ok(QueryResult {
                         columns,
                         rows,
@@ -849,7 +876,6 @@ fn nested_loop_join(
                         rows_affected: 0,
                     });
                 }
-            }
         }
     }
 
@@ -1305,7 +1331,7 @@ fn eval_binary(op: &BinaryOp, left: &Value, right: &Value) -> Value {
         BinaryOp::Like | BinaryOp::ILike => {
             // Simple contains match for LIKE
             if let (Value::String(s), Value::String(pat)) = (left, right) {
-                let pattern = pat.replace('%', "").replace('_', "");
+                let pattern = pat.replace(['%', '_'], "");
                 Value::Bool(s.contains(&pattern))
             } else {
                 Value::Bool(false)
@@ -1360,25 +1386,40 @@ fn cast_value(v: &Value, target: &DataType) -> Value {
         DataType::Integer => match v {
             Value::Int(_) => v.clone(),
             Value::Float(f) => Value::Int(*f as i64),
-            Value::String(s) => s.parse().map(Value::Int).unwrap_or(Value::Null),
+            Value::String(s) => s.parse().map(Value::Int).unwrap_or_else(|e| {
+                warn!("failed to cast string to int: {} ({})", s, e);
+                Value::Null
+            }),
             Value::Bool(b) => Value::Int(if *b { 1 } else { 0 }),
             _ => Value::Null,
         },
         DataType::Float => match v {
             Value::Float(_) => v.clone(),
             Value::Int(i) => Value::Float(*i as f64),
-            Value::String(s) => s.parse().map(Value::Float).unwrap_or(Value::Null),
+            Value::String(s) => s.parse().map(Value::Float).unwrap_or_else(|e| {
+                warn!("failed to cast string to float: {} ({})", s, e);
+                Value::Null
+            }),
             _ => Value::Null,
         },
         DataType::String => match v {
             Value::String(_) => v.clone(),
-            _ => Value::String(format!("{:?}", v)),
+            Value::Null => Value::Null,
+            Value::Int(i) => Value::String(i.to_string()),
+            Value::Float(f) => Value::String(f.to_string()),
+            Value::Bool(b) => Value::String(b.to_string()),
+        },
+        DataType::DateTime | DataType::Json => match v {
+            Value::String(s) => Value::String(s.clone()),
+            Value::Int(i) => Value::String(i.to_string()),
+            Value::Float(f) => Value::String(f.to_string()),
+            Value::Bool(b) => Value::String(b.to_string()),
+            Value::Null => Value::Null,
         },
         DataType::Boolean => match v {
             Value::Bool(_) => v.clone(),
             _ => Value::Bool(is_truthy(v)),
         },
-        DataType::DateTime | DataType::Json => Value::String(format!("{:?}", v)),
     }
 }
 
@@ -1391,16 +1432,25 @@ fn cmp_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         (_, Value::Null) => std::cmp::Ordering::Greater,
         (Value::String(a), Value::String(b)) => a.cmp(b),
         (Value::Int(a), Value::Int(b)) => a.cmp(b),
-        (Value::Float(a), Value::Float(b)) => {
-            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-        }
+        (Value::Float(a), Value::Float(b)) => a
+            .partial_cmp(b)
+            .unwrap_or_else(|| {
+                warn!("NaN comparison: treating {:?} <=> {:?} as equal", a, b);
+                std::cmp::Ordering::Equal
+            }),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         (Value::Int(a), Value::Float(b)) => (*a as f64)
             .partial_cmp(b)
-            .unwrap_or(std::cmp::Ordering::Equal),
+            .unwrap_or_else(|| {
+                warn!("NaN comparison: treating {} <=> {:?} as equal", a, b);
+                std::cmp::Ordering::Equal
+            }),
         (Value::Float(a), Value::Int(b)) => a
             .partial_cmp(&(*b as f64))
-            .unwrap_or(std::cmp::Ordering::Equal),
+            .unwrap_or_else(|| {
+                warn!("NaN comparison: treating {:?} <=> {} as equal", a, b);
+                std::cmp::Ordering::Equal
+            }),
         _ => std::cmp::Ordering::Equal,
     }
 }
