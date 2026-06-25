@@ -1,4 +1,4 @@
-use crate::common::{execute_river, TestContext};
+use crate::common::{drop_table_if_exists, execute_river, TestContext};
 use river::adapters::Value;
 
 // ── ALTER TABLE: ADD COLUMN ──────────────────────────────────────────────────
@@ -8,8 +8,8 @@ async fn alter_add_column_roundtrip() {
     let ctx = TestContext::new().await;
     let tn = "t13_add_col_pg";
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
-    execute_river(&ctx, &format!("create table if not exists {}@pg (id int primary key, name string)", tn))
+    drop_table_if_exists(&ctx, tn, "pg").await;
+    execute_river(&ctx, &format!("create table {}@pg (id int primary key, name string)", tn))
         .await
         .unwrap();
     execute_river(&ctx, &format!(r#"create {}@pg {{ id: 1, name: "Alice" }}"#, tn))
@@ -31,7 +31,7 @@ async fn alter_add_column_roundtrip() {
     assert_eq!(result.rows[0][1], Value::String("Alice".into()));
     assert_eq!(result.rows[0][2], Value::Null);
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
+    drop_table_if_exists(&ctx, tn, "pg").await;
 }
 
 #[tokio::test]
@@ -39,8 +39,8 @@ async fn alter_add_column_not_null_with_default() {
     let ctx = TestContext::new().await;
     let tn = "t13_add_col_nndef_pg";
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
-    execute_river(&ctx, &format!("create table if not exists {}@pg (id int primary key, name string)", tn))
+    drop_table_if_exists(&ctx, tn, "pg").await;
+    execute_river(&ctx, &format!("create table {}@pg (id int primary key, name string)", tn))
         .await
         .unwrap();
 
@@ -57,7 +57,7 @@ async fn alter_add_column_not_null_with_default() {
         .unwrap();
     assert_eq!(result.rows[0][1], Value::String("free".into()));
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
+    drop_table_if_exists(&ctx, tn, "pg").await;
 }
 
 #[tokio::test]
@@ -65,8 +65,8 @@ async fn alter_drop_column() {
     let ctx = TestContext::new().await;
     let tn = "t13_drop_col_pg";
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
-    execute_river(&ctx, &format!("create table if not exists {}@pg (id int primary key, temp string)", tn))
+    drop_table_if_exists(&ctx, tn, "pg").await;
+    execute_river(&ctx, &format!("create table {}@pg (id int primary key, temp string)", tn))
         .await
         .unwrap();
 
@@ -78,7 +78,7 @@ async fn alter_drop_column() {
     let temp_row = desc.rows.iter().find(|r| r[0] == Value::String("temp".into()));
     assert!(temp_row.is_none(), "temp column should be gone after drop");
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
+    drop_table_if_exists(&ctx, tn, "pg").await;
 }
 
 #[tokio::test]
@@ -86,8 +86,8 @@ async fn alter_rename_column() {
     let ctx = TestContext::new().await;
     let tn = "t13_rename_col_pg";
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
-    execute_river(&ctx, &format!("create table if not exists {}@pg (id int primary key, old_name string)", tn))
+    drop_table_if_exists(&ctx, tn, "pg").await;
+    execute_river(&ctx, &format!("create table {}@pg (id int primary key, old_name string)", tn))
         .await
         .unwrap();
 
@@ -110,7 +110,7 @@ async fn alter_rename_column() {
         .unwrap();
     assert_eq!(result.rows[0][0], Value::String("Alice".into()));
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
+    drop_table_if_exists(&ctx, tn, "pg").await;
 }
 
 #[tokio::test]
@@ -119,9 +119,9 @@ async fn alter_rename_table() {
     let tn = "t13_rename_tbl_pg";
     let new_tn = "t13_renamed_pg";
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", new_tn)).await;
-    execute_river(&ctx, &format!("create table if not exists {}@pg (id int primary key)", tn))
+    drop_table_if_exists(&ctx, tn, "pg").await;
+    drop_table_if_exists(&ctx, new_tn, "pg").await;
+    execute_river(&ctx, &format!("create table {}@pg (id int primary key)", tn))
         .await
         .unwrap();
 
@@ -133,7 +133,7 @@ async fn alter_rename_table() {
     let renamed = tables.rows.iter().any(|r| r[0] == Value::String(new_tn.into()));
     assert!(renamed, "renamed table should appear in table list");
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", new_tn)).await;
+    drop_table_if_exists(&ctx, new_tn, "pg").await;
 }
 
 #[tokio::test]
@@ -141,8 +141,8 @@ async fn alter_alter_column_type() {
     let ctx = TestContext::new().await;
     let tn = "t13_alter_col_type_pg";
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
-    execute_river(&ctx, &format!("create table if not exists {}@pg (id int primary key, val string)", tn))
+    drop_table_if_exists(&ctx, tn, "pg").await;
+    execute_river(&ctx, &format!("create table {}@pg (id int primary key, val string)", tn))
         .await
         .unwrap();
 
@@ -154,13 +154,13 @@ async fn alter_alter_column_type() {
         .await
         .unwrap();
 
-    let result = execute_river(&ctx, &format!("find val from {}@pg", tn))
+    let result = execute_river(&ctx, &format!("find [val] from {}@pg", tn))
         .await
         .unwrap();
     // Value might be Float or Int depending on adapter
     assert!(result.rows[0][0] != Value::Null);
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
+    drop_table_if_exists(&ctx, tn, "pg").await;
 }
 
 #[tokio::test]
@@ -168,10 +168,10 @@ async fn alter_drop_default() {
     let ctx = TestContext::new().await;
     let tn = "t13_drop_default_pg";
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
+    drop_table_if_exists(&ctx, tn, "pg").await;
     execute_river(
         &ctx,
-        &format!("create table if not exists {}@pg (id int primary key, status string default \"active\")", tn),
+        &format!("create table {}@pg (id int primary key, status string default \"active\")", tn),
     )
     .await
     .unwrap();
@@ -185,13 +185,13 @@ async fn alter_drop_default() {
         .await
         .unwrap();
 
-    let result = execute_river(&ctx, &format!("find status from {}@pg", tn))
+    let result = execute_river(&ctx, &format!("find [status] from {}@pg", tn))
         .await
         .unwrap();
     // Without default, status should be NULL
     assert_eq!(result.rows[0][0], Value::Null);
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
+    drop_table_if_exists(&ctx, tn, "pg").await;
 }
 
 #[tokio::test]
@@ -199,8 +199,8 @@ async fn alter_idempotent_add() {
     let ctx = TestContext::new().await;
     let tn = "t13_idemp_add_pg";
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
-    execute_river(&ctx, &format!("create table if not exists {}@pg (id int primary key)", tn))
+    drop_table_if_exists(&ctx, tn, "pg").await;
+    execute_river(&ctx, &format!("create table {}@pg (id int primary key)", tn))
         .await
         .unwrap();
 
@@ -212,7 +212,7 @@ async fn alter_idempotent_add() {
     let result = execute_river(&ctx, &format!("alter table {}@pg add column extra string", tn)).await;
     assert!(result.is_err(), "adding existing column should error");
 
-    let _ = execute_river(&ctx, &format!("remove {}@pg where id > 0", tn)).await;
+    drop_table_if_exists(&ctx, tn, "pg").await;
 }
 
 #[tokio::test]

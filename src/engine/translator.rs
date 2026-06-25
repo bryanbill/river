@@ -756,10 +756,10 @@ pub fn translate_alter_table(at: &AlterTable, dialect: &dyn SqlDialect) -> Strin
                 let type_sql = translate_data_type(dt, dialect);
                 match dialect.kind() {
                     DatabaseKind::Postgres => {
+                        let col = dialect.quote_ident(name);
+                        // Add USING clause for safe type conversion
                         clauses.push(format!(
-                            "ALTER COLUMN {} TYPE {}",
-                            dialect.quote_ident(name),
-                            type_sql
+                            "ALTER COLUMN {col} TYPE {type_sql} USING {col}::{type_sql}"
                         ));
                     }
                     DatabaseKind::MySQL => {

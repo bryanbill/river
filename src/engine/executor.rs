@@ -526,6 +526,11 @@ async fn execute_node(
         }
         PlanNode::Empty => Ok(empty_result()),
         PlanNode::AlterTable { database, sql } => {
+            if database.1 == DatabaseKind::MongoDB {
+                return Err(RiverError::Unsupported(
+                    "ALTER TABLE is not supported on MongoDB".into(),
+                ));
+            }
             if sql.is_empty() {
                 return Ok(QueryResult {
                     columns: vec![],
@@ -1061,8 +1066,19 @@ fn apply_projection(
                     _ => "expr".to_string(),
                 });
                 let (idx, src) = match expr {
-                    Expression::Ident(n) | Expression::QualifiedIdent { field: n, .. } => {
+                    Expression::Ident(n) => {
                         let i = result.columns.iter().position(|c| c == n);
+                        let s = i.and_then(|pos| result.column_sources.get(pos).cloned()).flatten();
+                        (i, s)
+                    }
+                    Expression::QualifiedIdent { table, field } => {
+                        let i = result.columns.iter()
+                            .enumerate()
+                            .position(|(pos, c)| {
+                                c == field && result.column_sources.get(pos)
+                                    .and_then(|s| s.as_deref()) == Some(table.as_str())
+                            })
+                            .or_else(|| result.columns.iter().position(|c| c == field));
                         let s = i.and_then(|pos| result.column_sources.get(pos).cloned()).flatten();
                         (i, s)
                     }

@@ -164,12 +164,12 @@ impl DatabaseAdapter for PostgresAdapter {
 
     async fn describe_table(&self, table: &str, schema: Option<&str>) -> Result<TableSchema, RiverError> {
         let schema_filter = schema
-            .map(|s| format!(" AND table_schema = '{}'", s.replace('\'', "''")))
-            .unwrap_or_default();
+            .map(|s| format!("table_schema = '{}'", s.replace('\'', "''")))
+            .unwrap_or_else(|| "table_schema = 'public'".to_string());
         let query = format!(
             "SELECT column_name, data_type, is_nullable \
              FROM information_schema.columns \
-             WHERE table_name = $1{} ORDER BY ordinal_position",
+             WHERE table_name = $1 AND {} ORDER BY ordinal_position",
             schema_filter
         );
         let rows = sqlx::query_as::<_, (String, String, String)>(AssertSqlSafe(query))
