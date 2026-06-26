@@ -1227,3 +1227,111 @@ fn parse_drop_table_full() {
         other => panic!("Expected DropTable, got {:?}", other),
     }
 }
+
+#[test]
+fn parse_create_database() {
+    let result = parse_one("create database mydb");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateDatabase(cd) => {
+            assert_eq!(cd.name, "mydb");
+            assert!(!cd.if_not_exists);
+            assert!(cd.connection.is_none());
+        }
+        other => panic!("Expected CreateDatabase, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_database_if_not_exists() {
+    let result = parse_one("create database if not exists mydb");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateDatabase(cd) => {
+            assert_eq!(cd.name, "mydb");
+            assert!(cd.if_not_exists);
+        }
+        other => panic!("Expected CreateDatabase, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_database_at_connection() {
+    let result = parse_one("create database mydb@pg");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateDatabase(cd) => {
+            assert_eq!(cd.name, "mydb");
+            assert_eq!(cd.connection.as_deref(), Some("pg"));
+        }
+        other => panic!("Expected CreateDatabase, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_database_if_not_exists_at_connection() {
+    let result = parse_one("create database if not exists mydb@pg");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::CreateDatabase(cd) => {
+            assert_eq!(cd.name, "mydb");
+            assert!(cd.if_not_exists);
+            assert_eq!(cd.connection.as_deref(), Some("pg"));
+        }
+        other => panic!("Expected CreateDatabase, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_drop_database() {
+    let result = parse_one("drop database mydb");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropDatabase(dd) => {
+            assert_eq!(dd.name, "mydb");
+            assert!(!dd.if_exists);
+            assert!(dd.connection.is_none());
+        }
+        other => panic!("Expected DropDatabase, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_drop_database_if_exists() {
+    let result = parse_one("drop database if exists mydb");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropDatabase(dd) => {
+            assert_eq!(dd.name, "mydb");
+            assert!(dd.if_exists);
+        }
+        other => panic!("Expected DropDatabase, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_drop_database_at_connection() {
+    let result = parse_one("drop database mydb@pg");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropDatabase(dd) => {
+            assert_eq!(dd.name, "mydb");
+            assert_eq!(dd.connection.as_deref(), Some("pg"));
+        }
+        other => panic!("Expected DropDatabase, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_drop_database_if_exists_at_connection() {
+    let result = parse_one("drop database if exists mydb@pg");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropDatabase(dd) => {
+            assert_eq!(dd.name, "mydb");
+            assert!(dd.if_exists);
+            assert_eq!(dd.connection.as_deref(), Some("pg"));
+        }
+        other => panic!("Expected DropDatabase, got {:?}", other),
+    }
+}

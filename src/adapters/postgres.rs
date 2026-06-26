@@ -14,6 +14,7 @@ use crate::error::RiverError;
 
 pub struct PostgresAdapter {
     pool: sqlx::PgPool,
+    config: ConnectionConfig,
 }
 
 fn row_to_values(row: &PgRow) -> Vec<Value> {
@@ -105,7 +106,10 @@ impl DatabaseAdapter for PostgresAdapter {
             .max_connections(5)
             .connect(&config.uri)
             .await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            config: config.clone(),
+        })
     }
 
     fn dialect(&self) -> DatabaseKind {
@@ -190,6 +194,23 @@ impl DatabaseAdapter for PostgresAdapter {
         Ok(TableSchema {
             name: table.to_string(),
             columns,
+        })
+    }
+
+    async fn exec_maintenance(&self, sql: &str) -> Result<QueryResult, RiverError> {
+        let maint_uri = super::swap_database_in_uri(&self.config.uri, "postgres")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&maint_uri)
+            .await?;
+        let result = sqlx::query(AssertSqlSafe(sql)).execute(&pool).await?;
+        let rows_affected = result.rows_affected();
+        Ok(QueryResult {
+            columns: vec![],
+            column_sources: vec![],
+            rows: vec![],
+            elapsed: std::time::Duration::default(),
+            rows_affected,
         })
     }
 }

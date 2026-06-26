@@ -113,6 +113,7 @@ fn ident_or_keyword() -> impl Parser<Spanned, String, Error = PErr> {
         Token::Type => Ok("type".to_string()),
         Token::Cascade => Ok("cascade".to_string()),
         Token::Restrict => Ok("restrict".to_string()),
+        Token::Database => Ok("database".to_string()),
         _ => Err(Simple::custom(s, "expected identifier")),
     })
 }
@@ -1386,6 +1387,51 @@ pub fn parser() -> Parser_<Vec<Statement>> {
                 })
             });
 
+        let create_database = tok(Token::Create)
+            .ignore_then(tok(Token::Database))
+            .ignore_then(
+                tok(Token::If)
+                    .ignore_then(tok(Token::Not))
+                    .ignore_then(tok(Token::Exists))
+                    .or_not()
+                    .map(|ifn| ifn.is_some()),
+            )
+            .then(ident_or_keyword())
+            .then(
+                tok(Token::At)
+                    .ignore_then(ident_or_keyword())
+                    .or_not(),
+            )
+            .map(|((if_not_exists, name), connection)| {
+                Statement::CreateDatabase(CreateDatabase {
+                    name,
+                    connection,
+                    if_not_exists,
+                })
+            });
+
+        let drop_database = tok(Token::Drop)
+            .ignore_then(tok(Token::Database))
+            .ignore_then(
+                tok(Token::If)
+                    .ignore_then(tok(Token::Exists))
+                    .or_not()
+                    .map(|ifn| ifn.is_some()),
+            )
+            .then(ident_or_keyword())
+            .then(
+                tok(Token::At)
+                    .ignore_then(ident_or_keyword())
+                    .or_not(),
+            )
+            .map(|((if_exists, name), connection)| {
+                Statement::DropDatabase(DropDatabase {
+                    name,
+                    connection,
+                    if_exists,
+                })
+            });
+
         let query_or_setop = query_chain
             .map(|(first, rest)| {
                 if rest.is_empty() {
@@ -1412,6 +1458,8 @@ pub fn parser() -> Parser_<Vec<Statement>> {
             create_table_as.boxed(),
             alter_table.boxed(),
             drop_table.boxed(),
+            create_database.boxed(),
+            drop_database.boxed(),
             query_or_setop.boxed(),
             with_stmt.boxed(),
             explain.boxed(),

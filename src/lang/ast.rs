@@ -15,6 +15,8 @@ pub enum Statement {
     CreateTableAs(CreateTableAs),
     AlterTable(AlterTable),
     DropTable(DropTable),
+    CreateDatabase(CreateDatabase),
+    DropDatabase(DropDatabase),
     ParamAssign {
         name: String,
         value: Expression,
@@ -442,6 +444,20 @@ pub struct DropTable {
     pub schema: Option<String>,
     pub if_exists: bool,
     pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateDatabase {
+    pub name: String,
+    pub connection: Option<String>,
+    pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropDatabase {
+    pub name: String,
+    pub connection: Option<String>,
+    pub if_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

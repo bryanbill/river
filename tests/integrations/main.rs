@@ -20,6 +20,7 @@ mod t11_create_table;
 mod t12_is_null;
 mod t13_alter_table;
 mod t14_drop_table;
+mod t15_create_drop_database;
 
 #[path = "../common/mod.rs"]
 mod common;

@@ -1293,6 +1293,55 @@ On a specific connection or schema:
 drop table if exists archive.logs@pg cascade
 ```
 
+### CREATE DATABASE
+
+Create a new database on a connected server:
+
+```sql
+create database analytics
+```
+
+With IF NOT EXISTS (idempotent):
+
+```sql
+create database if not exists analytics
+```
+
+On a specific connection:
+
+```sql
+create database analytics@pg
+create database reports@mysql
+```
+
+> **SQLite note:** SQLite does not support server-level databases. Use separate `.db` files with different URIs instead.
+> **MongoDB note:** MongoDB databases are auto-created on first document insertion. `create database` is accepted but is effectively a no-op.
+
+### DROP DATABASE
+
+Remove a database from a connected server:
+
+```sql
+drop database analytics
+```
+
+With IF EXISTS (safe for scripts):
+
+```sql
+drop database if exists temp_logs
+```
+
+On a specific connection:
+
+```sql
+drop database analytics@pg
+drop database reports@mysql
+```
+
+> **Warning:** `DROP DATABASE` is irreversible. All data in the database is permanently deleted.
+> **SQLite note:** Use filesystem operations to delete the `.db` file. `drop database` returns an error.
+> **MongoDB note:** `drop database` maps to MongoDB's `db.dropDatabase()` command.
+
 ### Persisting Query Results — `>>`
 
 Save the results of any query to a table using `>>`:
@@ -1337,6 +1386,10 @@ insert if exists on conflict ignore
 | Drop table              | `drop table t`                                 | `DROP TABLE t`                    |
 | Drop if exists          | `drop table if exists t`                       | `DROP TABLE IF EXISTS t`          |
 | Drop cascade            | `drop table t cascade`                         | `DROP TABLE t CASCADE`            |
+| Create database         | `create database name`                         | `CREATE DATABASE name`            |
+| Create database if not  | `create database if not exists name`           | `CREATE DATABASE IF NOT EXISTS name`|
+| Drop database           | `drop database name`                           | `DROP DATABASE name`              |
+| Drop database if exists | `drop database if exists name`                 | `DROP DATABASE IF EXISTS name`    |
 | Update                  | `update table set ... where ...`               | `UPDATE table SET ... WHERE ...`  |
 | Delete                  | `remove table where ...`                       | `DELETE FROM table WHERE ...`     |
 
@@ -1481,7 +1534,7 @@ limit N offset M
 | `is null` / `is not null`                 | NULL tests               |
 | `and` / `or` / `not`                      | Logical operators        |
 | `over` / `partition by` / `window`        | Window functions         |
-| `create`                                  | INSERT / CREATE TABLE    |
+| `create`                                  | INSERT / CREATE TABLE / CREATE DATABASE |
 | `table`                                   | CREATE TABLE syntax      |
 | `if` / `exists`                           | IF NOT EXISTS            |
 | `insert`                                  | Persist query (`>>`)     |
@@ -1492,7 +1545,8 @@ limit N offset M
 | `alter`                                   | ALTER TABLE              |
 | `add`                                     | ALTER TABLE ADD COLUMN   |
 | `column`                                  | ALTER TABLE column ref   |
-| `drop`                                    | DROP TABLE / DROP COLUMN |
+| `drop`                                    | DROP TABLE / DROP COLUMN / DROP DATABASE |
+| `database`                                | CREATE DATABASE / DROP DATABASE          |
 | `rename`                                  | ALTER TABLE RENAME       |
 | `to`                                      | ALTER TABLE RENAME TO    |
 | `type`                                    | ALTER COLUMN TYPE        |

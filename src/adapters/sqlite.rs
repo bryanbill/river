@@ -148,4 +148,10 @@ impl DatabaseAdapter for SQLiteAdapter {
             columns,
         })
     }
+
+    async fn exec_maintenance(&self, _sql: &str) -> Result<QueryResult, RiverError> {
+        Err(RiverError::Unsupported(
+            "CREATE/DROP DATABASE is not supported for SQLite. SQLite databases are files managed at the filesystem level.".into(),
+        ))
+    }
 }

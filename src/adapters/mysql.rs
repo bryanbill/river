@@ -14,6 +14,7 @@ use crate::error::RiverError;
 
 pub struct MySQLAdapter {
     pool: sqlx::MySqlPool,
+    config: ConnectionConfig,
 }
 
 fn row_to_values(row: &MySqlRow) -> Vec<Value> {
@@ -96,7 +97,10 @@ fn row_to_values(row: &MySqlRow) -> Vec<Value> {
 impl DatabaseAdapter for MySQLAdapter {
     async fn connect(config: &ConnectionConfig) -> Result<Self, RiverError> {
         let pool = sqlx::MySqlPool::connect(&config.uri).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            config: config.clone(),
+        })
     }
 
     fn dialect(&self) -> DatabaseKind {
@@ -181,6 +185,28 @@ impl DatabaseAdapter for MySQLAdapter {
         Ok(TableSchema {
             name: table.to_string(),
             columns,
+        })
+    }
+
+    async fn exec_maintenance(&self, sql: &str) -> Result<QueryResult, RiverError> {
+        let pool = if let Some(slash) = self.config.uri.rfind('/')
+            && let Some(at_pos) = self.config.uri.rfind('@')
+            && slash > at_pos
+        {
+            let no_db = &self.config.uri[..slash];
+            sqlx::MySqlPool::connect(no_db).await?
+        } else {
+            sqlx::MySqlPool::connect(&self.config.uri).await?
+        };
+
+        let result = sqlx::query(AssertSqlSafe(sql)).execute(&pool).await?;
+        let rows_affected = result.rows_affected();
+        Ok(QueryResult {
+            columns: vec![],
+            column_sources: vec![],
+            rows: vec![],
+            elapsed: std::time::Duration::default(),
+            rows_affected,
         })
     }
 }
