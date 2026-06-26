@@ -103,6 +103,10 @@ pub trait DatabaseAdapter: Send + Sync {
     /// Return which database dialect this adapter speaks.
     #[allow(dead_code)]
     fn dialect(&self) -> DatabaseKind;
+
+    /// Execute a server-level DDL command (CREATE DATABASE, DROP DATABASE).
+    /// This connects to the server's maintenance database, not the user database.
+    async fn exec_maintenance(&self, sql: &str) -> Result<QueryResult, RiverError>;
 }
 
 pub async fn create_adapter(
@@ -135,4 +139,24 @@ pub(crate) fn format_date(d: time::Date) -> String {
 pub(crate) fn format_time(t: time::Time) -> String {
     let format = time::macros::format_description!("[hour]:[minute]:[second]");
     t.format(format).unwrap_or_else(|_| t.to_string())
+}
+
+/// Replace the database name in a connection URI with the given maintenance database.
+pub(crate) fn swap_database_in_uri(uri: &str, new_db: &str) -> Result<String, RiverError> {
+    let scheme_end = uri
+        .find("://")
+        .map(|p| p + 3)
+        .ok_or_else(|| RiverError::Unsupported("invalid URI: missing scheme".into()))?;
+    let after_scheme = &uri[scheme_end..];
+    let slash_pos = after_scheme.find('/').map(|p| p + scheme_end);
+
+    match slash_pos {
+        Some(slash) => {
+            let prefix = &uri[..=slash];
+            let rest = &uri[slash + 1..];
+            let query_pos = rest.find('?').unwrap_or(rest.len());
+            Ok(format!("{}{}{}", prefix, new_db, &rest[query_pos..]))
+        }
+        None => Ok(format!("{}/{}", uri, new_db)),
+    }
 }

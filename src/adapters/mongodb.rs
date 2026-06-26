@@ -93,6 +93,22 @@ impl DatabaseAdapter for MongoAdapter {
         let parsed: JsonValue =
             serde_json::from_str(query).map_err(|e| RiverError::Unsupported(e.to_string()))?;
 
+        // DROP DATABASE mode: when "dropDatabase" field is present
+        if parsed.get("dropDatabase").is_some() {
+            let db_name = parsed["database"]
+                .as_str()
+                .ok_or_else(|| RiverError::Unsupported("missing 'database' field in dropDatabase command".into()))?;
+            let db = self.client.database(db_name);
+            db.drop().await?;
+            return Ok(QueryResult {
+                columns: vec![],
+                column_sources: vec![],
+                rows: vec![],
+                elapsed: start.elapsed(),
+                rows_affected: 0,
+            });
+        }
+
         let db_name = parsed["database"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -334,5 +350,9 @@ impl DatabaseAdapter for MongoAdapter {
             name: table.to_string(),
             columns,
         })
+    }
+
+    async fn exec_maintenance(&self, sql: &str) -> Result<QueryResult, RiverError> {
+        self.execute(sql).await
     }
 }

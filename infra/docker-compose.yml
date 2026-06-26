@@ -23,6 +23,8 @@ services:
       MYSQL_DATABASE: river
     ports:
       - "3307:3306"
+    volumes:
+      - ./init-mysql.sql:/docker-entrypoint-initdb.d/init-mysql.sql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 3s

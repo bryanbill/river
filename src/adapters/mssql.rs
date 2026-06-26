@@ -16,6 +16,7 @@ use tracing::warn;
 
 pub struct MssqlAdapter {
     config_uri: String,
+    config: ConnectionConfig,
     client: Arc<Mutex<Client<Compat<TcpStream>>>>,
 }
 
@@ -120,6 +121,7 @@ impl DatabaseAdapter for MssqlAdapter {
         let client = connect_client(&config.uri).await?;
         Ok(Self {
             config_uri: config.uri.clone(),
+            config: config.clone(),
             client: Arc::new(Mutex::new(client)),
         })
     }
@@ -235,6 +237,21 @@ impl DatabaseAdapter for MssqlAdapter {
         Ok(TableSchema {
             name: table.to_string(),
             columns,
+        })
+    }
+
+    async fn exec_maintenance(&self, sql: &str) -> Result<QueryResult, RiverError> {
+        use super::swap_database_in_uri;
+        let maint_uri = swap_database_in_uri(&self.config.uri, "master")?;
+        let mut client = connect_client(&maint_uri).await?;
+        let (columns, rows, rows_affected) = execute_stream(&mut client, sql).await?;
+        let num_cols = columns.len();
+        Ok(QueryResult {
+            columns,
+            column_sources: vec![None; num_cols],
+            rows,
+            elapsed: std::time::Duration::default(),
+            rows_affected,
         })
     }
 }

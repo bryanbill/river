@@ -595,6 +595,8 @@ pub fn translate_statement_sql(stmt: &Statement, dialect: &dyn SqlDialect) -> St
         Statement::Delete(delete) => translate_delete_sql(delete, dialect),
         Statement::CreateTable(ct) => translate_create_table(ct, dialect),
         Statement::DropTable(dt) => translate_drop_table(dt, dialect),
+        Statement::CreateDatabase(cd) => translate_create_database(cd, dialect),
+        Statement::DropDatabase(dd) => translate_drop_database(dd, dialect),
         Statement::Noop => String::new(),
         _ => "-- unsupported statement type".to_string(),
     }
@@ -649,6 +651,22 @@ pub fn translate_drop_table(dt: &DropTable, dialect: &dyn SqlDialect) -> String 
     };
 
     format!("DROP TABLE {}{}{}", if_exists, table_name, cascade)
+}
+
+pub fn translate_create_database(cd: &CreateDatabase, dialect: &dyn SqlDialect) -> String {
+    let name = dialect.quote_ident(&cd.name);
+    if cd.if_not_exists && dialect.kind() == DatabaseKind::Postgres {
+        format!("CREATE DATABASE {}", name)
+    } else {
+        let if_not_exists = if cd.if_not_exists { "IF NOT EXISTS " } else { "" };
+        format!("CREATE DATABASE {}{}", if_not_exists, name)
+    }
+}
+
+pub fn translate_drop_database(dd: &DropDatabase, dialect: &dyn SqlDialect) -> String {
+    let name = dialect.quote_ident(&dd.name);
+    let if_exists = if dd.if_exists { "IF EXISTS " } else { "" };
+    format!("DROP DATABASE {}{}", if_exists, name)
 }
 
 pub fn translate_data_type(dt: &DataType, dialect: &dyn SqlDialect) -> String {

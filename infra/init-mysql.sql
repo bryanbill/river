@@ -1,0 +1,2 @@
+GRANT CREATE, DROP ON *.* TO 'river'@'%';
+FLUSH PRIVILEGES;

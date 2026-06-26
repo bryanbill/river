@@ -88,6 +88,7 @@ pub enum Token {
     Type,
     Cascade,
     Restrict,
+    Database,
 
     // Aggregate function names (treated as keywords)
     Count,
@@ -275,6 +276,7 @@ impl fmt::Display for Token {
             Token::Type => write!(f, "type"),
             Token::Cascade => write!(f, "cascade"),
             Token::Restrict => write!(f, "restrict"),
+            Token::Database => write!(f, "database"),
             Token::Count => write!(f, "count"),
             Token::Sum => write!(f, "sum"),
             Token::Avg => write!(f, "avg"),
@@ -587,6 +589,7 @@ impl<'a> Lexer<'a> {
             "type" => Spanned::new(Token::Type, start..end),
             "cascade" => Spanned::new(Token::Cascade, start..end),
             "restrict" => Spanned::new(Token::Restrict, start..end),
+            "database" => Spanned::new(Token::Database, start..end),
             _ => Spanned::new(Token::Ident(ident), start..end),
         }
     }

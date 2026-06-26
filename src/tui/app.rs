@@ -59,7 +59,7 @@ impl App {
         let mut output = OutputBuffer::new(10_000);
 
         output.push(OutputLine::Info(
-            "River v0.6.1 — Unified Database Access".into(),
+            "River v0.7.0 — Unified Database Access".into(),
         ));
 
         let connected: Vec<&str> = adapters.keys().map(|s| s.as_str()).collect();
@@ -365,7 +365,8 @@ async fn execute_query(app: &mut App, input: String) {
         Statement::Explain(inner) => {
             execute_explain(app, inner).await;
         }
-        Statement::CreateTable(_) | Statement::CreateTableAs(_) | Statement::AlterTable(_) | Statement::DropTable(_) => {
+        Statement::CreateTable(_) | Statement::CreateTableAs(_) | Statement::AlterTable(_) | Statement::DropTable(_)
+        | Statement::CreateDatabase(_) | Statement::DropDatabase(_) => {
             execute_dml(app, &stmt).await;
         }
         Statement::SetOp(_) | Statement::ParamAssign { .. } | Statement::Noop => {

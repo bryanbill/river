@@ -1396,3 +1396,80 @@ fn translate_drop_table_if_exists_cascade() {
     let sql = translate_drop_table(&dt, &PostgresDialect);
     assert_eq!(sql, r#"DROP TABLE IF EXISTS "logs" CASCADE"#);
 }
+
+#[test]
+fn translate_create_database_postgres() {
+    let cd = CreateDatabase {
+        name: "mydb".into(),
+        connection: None,
+        if_not_exists: false,
+    };
+    let sql = super::translator::translate_create_database(&cd, &PostgresDialect);
+    assert_eq!(sql, r#"CREATE DATABASE "mydb""#);
+}
+
+#[test]
+fn translate_create_database_if_not_exists_postgres() {
+    let cd = CreateDatabase {
+        name: "mydb".into(),
+        connection: None,
+        if_not_exists: true,
+    };
+    let sql = super::translator::translate_create_database(&cd, &PostgresDialect);
+    assert_eq!(sql, r#"CREATE DATABASE "mydb""#);
+}
+
+#[test]
+fn translate_create_database_mysql() {
+    let cd = CreateDatabase {
+        name: "mydb".into(),
+        connection: None,
+        if_not_exists: true,
+    };
+    let sql = super::translator::translate_create_database(&cd, &MySQLDialect);
+    assert_eq!(sql, "CREATE DATABASE IF NOT EXISTS `mydb`");
+}
+
+#[test]
+fn translate_create_database_mssql() {
+    let cd = CreateDatabase {
+        name: "mydb".into(),
+        connection: None,
+        if_not_exists: true,
+    };
+    let sql = super::translator::translate_create_database(&cd, &MSSQLDialect);
+    assert_eq!(sql, "CREATE DATABASE IF NOT EXISTS [mydb]");
+}
+
+#[test]
+fn translate_drop_database_postgres() {
+    let dd = DropDatabase {
+        name: "mydb".into(),
+        connection: None,
+        if_exists: false,
+    };
+    let sql = super::translator::translate_drop_database(&dd, &PostgresDialect);
+    assert_eq!(sql, r#"DROP DATABASE "mydb""#);
+}
+
+#[test]
+fn translate_drop_database_if_exists_mysql() {
+    let dd = DropDatabase {
+        name: "mydb".into(),
+        connection: None,
+        if_exists: true,
+    };
+    let sql = super::translator::translate_drop_database(&dd, &MySQLDialect);
+    assert_eq!(sql, "DROP DATABASE IF EXISTS `mydb`");
+}
+
+#[test]
+fn translate_drop_database_mssql() {
+    let dd = DropDatabase {
+        name: "mydb".into(),
+        connection: None,
+        if_exists: false,
+    };
+    let sql = super::translator::translate_drop_database(&dd, &MSSQLDialect);
+    assert_eq!(sql, "DROP DATABASE [mydb]");
+}

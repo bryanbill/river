@@ -103,6 +103,23 @@ pub enum PlanNode {
         database: (String, DatabaseKind),
         sql: String,
     },
+    CreateDatabase {
+        database: (String, DatabaseKind),
+        sql: String,
+        is_mongo: bool,
+        if_not_exists: bool,
+        db_name: String,
+    },
+    DropDatabase {
+        database: (String, DatabaseKind),
+        sql: String,
+        is_mongo: bool,
+        if_exists: bool,
+        db_name: String,
+    },
+    ConnectionError {
+        message: String,
+    },
     Empty,
 }
 
@@ -193,7 +210,9 @@ fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
         PlanNode::CreateTableAs { database, .. } => Some(database.clone()),
         PlanNode::AlterTable { database, .. } => Some(database.clone()),
         PlanNode::DropTable { database, .. } => Some(database.clone()),
-        PlanNode::InlineData { .. } | PlanNode::Empty => None,
+        PlanNode::CreateDatabase { database, .. } => Some(database.clone()),
+        PlanNode::DropDatabase { database, .. } => Some(database.clone()),
+        PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ConnectionError { .. } => None,
     }
 }
 
@@ -402,7 +421,9 @@ pub fn plan_statement(
                     root: PlanNode::ListTables { database },
                 },
                 None => QueryPlan {
-                    root: PlanNode::Empty,
+                    root: PlanNode::ConnectionError {
+                        message: conn_name_error(conn),
+                    },
                 },
             }
         }
@@ -417,7 +438,9 @@ pub fn plan_statement(
                     },
                 },
                 None => QueryPlan {
-                    root: PlanNode::Empty,
+                    root: PlanNode::ConnectionError {
+                        message: conn_name_error(&desc.connection),
+                    },
                 },
             }
         }
@@ -439,7 +462,9 @@ pub fn plan_statement(
                     }
                 }
                 None => QueryPlan {
-                    root: PlanNode::Empty,
+                    root: PlanNode::ConnectionError {
+                        message: conn_name_error(&insert.connection),
+                    },
                 },
             }
         }
@@ -461,7 +486,9 @@ pub fn plan_statement(
                     }
                 }
                 None => QueryPlan {
-                    root: PlanNode::Empty,
+                    root: PlanNode::ConnectionError {
+                        message: conn_name_error(&update.connection),
+                    },
                 },
             }
         }
@@ -483,7 +510,9 @@ pub fn plan_statement(
                     }
                 }
                 None => QueryPlan {
-                    root: PlanNode::Empty,
+                    root: PlanNode::ConnectionError {
+                        message: conn_name_error(&delete.connection),
+                    },
                 },
             }
         }
@@ -508,7 +537,9 @@ pub fn plan_statement(
                     }
                 }
                 None => QueryPlan {
-                    root: PlanNode::Empty,
+                    root: PlanNode::ConnectionError {
+                        message: conn_name_error(&ct.connection),
+                    },
                 },
             }
         }
@@ -528,7 +559,9 @@ pub fn plan_statement(
                     }
                 }
                 None => QueryPlan {
-                    root: PlanNode::Empty,
+                    root: PlanNode::ConnectionError {
+                        message: conn_name_error(&cta.connection),
+                    },
                 },
             }
         }
@@ -555,7 +588,9 @@ pub fn plan_statement(
                     }
                 }
                 None => QueryPlan {
-                    root: PlanNode::Empty,
+                    root: PlanNode::ConnectionError {
+                        message: conn_name_error(&at.connection),
+                    },
                 },
             }
         }
@@ -580,7 +615,69 @@ pub fn plan_statement(
                     }
                 }
                 None => QueryPlan {
-                    root: PlanNode::Empty,
+                    root: PlanNode::ConnectionError {
+                        message: conn_name_error(&dt.connection),
+                    },
+                },
+            }
+        }
+        Statement::CreateDatabase(cd) => {
+            let db = resolve_connection(&cd.connection, source_db);
+            match db {
+                Some((db_name, db_kind)) => {
+                    let (sql, is_mongo) = if db_kind == DatabaseKind::MongoDB {
+                        (String::new(), true)
+                    } else if db_kind == DatabaseKind::SQLite {
+                        (String::new(), false)
+                    } else {
+                        let dialect = dialect_for_kind(&db_kind);
+                        let sql = crate::engine::translator::translate_create_database(cd, &*dialect);
+                        (sql, false)
+                    };
+                    QueryPlan {
+                        root: PlanNode::CreateDatabase {
+                            database: (db_name, db_kind),
+                            sql,
+                            is_mongo,
+                            if_not_exists: cd.if_not_exists,
+                            db_name: cd.name.clone(),
+                        },
+                    }
+                }
+                None => QueryPlan {
+                    root: PlanNode::ConnectionError {
+                        message: conn_name_error(&cd.connection),
+                    },
+                },
+            }
+        }
+        Statement::DropDatabase(dd) => {
+            let db = resolve_connection(&dd.connection, source_db);
+            match db {
+                Some((db_name, db_kind)) => {
+                    let (sql, is_mongo) = if db_kind == DatabaseKind::MongoDB {
+                        (format!(r#"{{"database":"{}","dropDatabase":1}}"#, dd.name), true)
+                    } else if db_kind == DatabaseKind::SQLite {
+                        (String::new(), false)
+                    } else {
+                        let dialect = dialect_for_kind(&db_kind);
+                        let sql = crate::engine::translator::translate_drop_database(dd, &*dialect);
+                        (sql, false)
+                    };
+                    QueryPlan {
+                        root: PlanNode::DropDatabase {
+                            database: (db_name, db_kind),
+                            sql,
+                            is_mongo,
+                            if_exists: dd.if_exists,
+                            db_name: dd.name.clone(),
+                        },
+                    }
+                }
+                None => QueryPlan {
+                    root: PlanNode::ConnectionError {
+                        message: conn_name_error(&dd.connection),
+                    },
                 },
             }
         }
@@ -602,6 +699,13 @@ fn resolve_connection(
         source_db.iter().find(|(n, _)| n == name).cloned()
     } else {
         source_db.first().cloned()
+    }
+}
+
+fn conn_name_error(conn: &Option<String>) -> String {
+    match conn {
+        Some(name) => format!("no connection configured with name '{}'", name),
+        None => "no database connection configured — provide a connection name with `@connection` or add a connection to river.yaml".into(),
     }
 }
 
@@ -959,8 +1063,23 @@ fn format_node(node: &PlanNode, lines: &mut Vec<String>, prefix: String, is_last
                 database.0, database.1
             ));
         }
+        PlanNode::CreateDatabase { database, sql, .. } => {
+            lines.push(format!(
+                "{connector}CreateDatabase @ {}:{:?} — {sql}",
+                database.0, database.1
+            ));
+        }
+        PlanNode::DropDatabase { database, sql, .. } => {
+            lines.push(format!(
+                "{connector}DropDatabase @ {}:{:?} — {sql}",
+                database.0, database.1
+            ));
+        }
         PlanNode::Empty => {
             lines.push(format!("{connector}(empty plan)"));
+        }
+        PlanNode::ConnectionError { message } => {
+            lines.push(format!("{connector}ERROR: {message}"));
         }
     }
 }
@@ -1101,6 +1220,12 @@ fn collect_databases(node: &PlanNode, out: &mut Vec<(String, DatabaseKind)>) {
         PlanNode::DropTable { database, .. } => {
             out.push(database.clone());
         }
-        PlanNode::InlineData { .. } | PlanNode::Empty => {}
+        PlanNode::CreateDatabase { database, .. } => {
+            out.push(database.clone());
+        }
+        PlanNode::DropDatabase { database, .. } => {
+            out.push(database.clone());
+        }
+        PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ConnectionError { .. } => {}
     }
 }

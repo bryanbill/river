@@ -34,7 +34,7 @@ fn plan_has_limit(node: &PlanNode) -> bool {
         | PlanNode::Union { left, right, .. } => plan_has_limit(left) || plan_has_limit(right),
         PlanNode::SemiJoinFetch { build, .. } => plan_has_limit(build),
         PlanNode::CreateTableAs { query_plan, .. } => plan_has_limit(query_plan),
-        PlanNode::Scan { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::AlterTable { .. } | PlanNode::DropTable { .. } => false,
+        PlanNode::Scan { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::AlterTable { .. } | PlanNode::DropTable { .. } | PlanNode::CreateDatabase { .. } | PlanNode::DropDatabase { .. } | PlanNode::ConnectionError { .. } => false,
     }
 }
 
@@ -179,7 +179,9 @@ fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
         PlanNode::CreateTableAs { database, .. } => Some(database.clone()),
         PlanNode::AlterTable { database, .. } => Some(database.clone()),
         PlanNode::DropTable { database, .. } => Some(database.clone()),
-        PlanNode::InlineData { .. } | PlanNode::Empty => None,
+        PlanNode::CreateDatabase { database, .. } => Some(database.clone()),
+        PlanNode::DropDatabase { database, .. } => Some(database.clone()),
+        PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ConnectionError { .. } => None,
     }
 }
 
@@ -263,7 +265,7 @@ fn collect_single_db_query(node: &PlanNode) -> Option<(String, DatabaseKind, Que
             });
             Some((ldb_name, ldb_kind, q))
         }
-        PlanNode::Union { .. } | PlanNode::SemiJoinFetch { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::CreateTableAs { .. } | PlanNode::AlterTable { .. } | PlanNode::DropTable { .. } => None,
+        PlanNode::Union { .. } | PlanNode::SemiJoinFetch { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::CreateTableAs { .. } | PlanNode::AlterTable { .. } | PlanNode::DropTable { .. } | PlanNode::CreateDatabase { .. } | PlanNode::DropDatabase { .. } | PlanNode::ConnectionError { .. } => None,
     }
 }
 
@@ -580,6 +582,65 @@ async fn execute_node(
 
             adapter.execute(sql).await
         }
+        PlanNode::CreateDatabase { database, sql, is_mongo, if_not_exists, db_name } => {
+            if *is_mongo {
+                return Ok(QueryResult {
+                    columns: vec!["message".to_string()],
+                    column_sources: vec![None],
+                    rows: vec![vec![Value::String(
+                        "OK — MongoDB database will be created on first document insertion".to_string()
+                    )]],
+                    elapsed: std::time::Duration::default(),
+                    rows_affected: 0,
+                });
+            }
+
+            if database.1 == DatabaseKind::SQLite {
+                return Err(RiverError::Unsupported(
+                    "CREATE DATABASE is not supported for SQLite. Use a separate .db file instead.".into()
+                ));
+            }
+
+            let adapter = adapters.get(&database.0).ok_or_else(|| {
+                RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
+            })?;
+
+            if *if_not_exists && database.1 == DatabaseKind::Postgres {
+                let check_sql = format!("SELECT 1 FROM pg_database WHERE datname = '{}'", db_name.replace('\'', "''"));
+                let result = adapter.execute(&check_sql).await?;
+                if !result.rows.is_empty() {
+                    return Ok(QueryResult {
+                        columns: vec![],
+                        column_sources: vec![],
+                        rows: vec![],
+                        elapsed: std::time::Duration::default(),
+                        rows_affected: 0,
+                    });
+                }
+            }
+
+            adapter.exec_maintenance(sql).await
+        }
+        PlanNode::DropDatabase { database, sql, is_mongo, if_exists: _, db_name: _ } => {
+            if *is_mongo {
+                let adapter = adapters.get(&database.0).ok_or_else(|| {
+                    RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
+                })?;
+                return adapter.execute(sql).await;
+            }
+
+            if database.1 == DatabaseKind::SQLite {
+                return Err(RiverError::Unsupported(
+                    "DROP DATABASE is not supported for SQLite. Delete the .db file instead.".into()
+                ));
+            }
+
+            let adapter = adapters.get(&database.0).ok_or_else(|| {
+                RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
+            })?;
+            adapter.exec_maintenance(sql).await
+        }
+        PlanNode::ConnectionError { message } => Err(RiverError::Unsupported(message.clone())),
         PlanNode::Scan { source, .. } => {
             if let SourceKind::CteRef(_) = &source.kind {
                 Err(RiverError::Unsupported(
@@ -2533,6 +2594,15 @@ mod tests {
         }
         fn dialect(&self) -> DatabaseKind {
             DatabaseKind::SQLite
+        }
+        async fn exec_maintenance(&self, _sql: &str) -> Result<QueryResult, RiverError> {
+            Ok(QueryResult {
+                columns: vec![],
+                column_sources: vec![],
+                rows: vec![],
+                elapsed: std::time::Duration::default(),
+                rows_affected: 0,
+            })
         }
     }
 
