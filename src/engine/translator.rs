@@ -594,6 +594,7 @@ pub fn translate_statement_sql(stmt: &Statement, dialect: &dyn SqlDialect) -> St
         Statement::Update(update) => translate_update_sql(update, dialect),
         Statement::Delete(delete) => translate_delete_sql(delete, dialect),
         Statement::CreateTable(ct) => translate_create_table(ct, dialect),
+        Statement::DropTable(dt) => translate_drop_table(dt, dialect),
         Statement::Noop => String::new(),
         _ => "-- unsupported statement type".to_string(),
     }
@@ -635,6 +636,19 @@ pub fn translate_create_table(ct: &CreateTable, dialect: &dyn SqlDialect) -> Str
         "CREATE TABLE {}{} ({}{})",
         if_not_exists, table_name, cols.join(", "), pk_clause
     )
+}
+
+pub fn translate_drop_table(dt: &DropTable, dialect: &dyn SqlDialect) -> String {
+    let table_name = qualify_table(&dt.table, dt.schema.as_deref(), dialect);
+    let if_exists = if dt.if_exists { "IF EXISTS " } else { "" };
+
+    let cascade = match (dt.cascade, dialect.kind()) {
+        (true, DatabaseKind::Postgres) => " CASCADE",
+        (true, DatabaseKind::MySQL) => " CASCADE",
+        _ => "",
+    };
+
+    format!("DROP TABLE {}{}{}", if_exists, table_name, cascade)
 }
 
 pub fn translate_data_type(dt: &DataType, dialect: &dyn SqlDialect) -> String {

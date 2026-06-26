@@ -111,6 +111,8 @@ fn ident_or_keyword() -> impl Parser<Spanned, String, Error = PErr> {
         Token::Rename => Ok("rename".to_string()),
         Token::To => Ok("to".to_string()),
         Token::Type => Ok("type".to_string()),
+        Token::Cascade => Ok("cascade".to_string()),
+        Token::Restrict => Ok("restrict".to_string()),
         _ => Err(Simple::custom(s, "expected identifier")),
     })
 }
@@ -1357,6 +1359,33 @@ pub fn parser() -> Parser_<Vec<Statement>> {
                 })
             });
 
+        let drop_table = tok(Token::Drop)
+            .ignore_then(tok(Token::Table))
+            .ignore_then(
+                tok(Token::If)
+                    .ignore_then(tok(Token::Exists))
+                    .or_not()
+                    .map(|ifn| ifn.is_some()),
+            )
+            .then(source_name())
+            .then(
+                choice((
+                    tok(Token::Cascade).map(|_| true),
+                    tok(Token::Restrict).map(|_| false),
+                ))
+                .or_not()
+                .map(|opt| opt.unwrap_or(false)),
+            )
+            .map(|((if_exists, (schema, table, conn)), cascade)| {
+                Statement::DropTable(DropTable {
+                    table,
+                    connection: conn,
+                    schema,
+                    if_exists,
+                    cascade,
+                })
+            });
+
         let query_or_setop = query_chain
             .map(|(first, rest)| {
                 if rest.is_empty() {
@@ -1382,6 +1411,7 @@ pub fn parser() -> Parser_<Vec<Statement>> {
             create_table.boxed(),
             create_table_as.boxed(),
             alter_table.boxed(),
+            drop_table.boxed(),
             query_or_setop.boxed(),
             with_stmt.boxed(),
             explain.boxed(),

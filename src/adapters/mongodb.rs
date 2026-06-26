@@ -117,6 +117,18 @@ impl DatabaseAdapter for MongoAdapter {
 
         let collection = db.collection::<Document>(coll_name);
 
+        // DROP COLLECTION mode: when "drop" field is present
+        if parsed.get("drop").is_some() {
+            collection.drop().await?;
+            return Ok(QueryResult {
+                columns: vec![],
+                column_sources: vec![],
+                rows: vec![],
+                elapsed: start.elapsed(),
+                rows_affected: 0,
+            });
+        }
+
         // Insert mode: when "documents" field is present
         if let Some(documents) = parsed["documents"].as_array() {
             let on_conflict = parsed["on_conflict"].as_str();

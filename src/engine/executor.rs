@@ -34,7 +34,7 @@ fn plan_has_limit(node: &PlanNode) -> bool {
         | PlanNode::Union { left, right, .. } => plan_has_limit(left) || plan_has_limit(right),
         PlanNode::SemiJoinFetch { build, .. } => plan_has_limit(build),
         PlanNode::CreateTableAs { query_plan, .. } => plan_has_limit(query_plan),
-        PlanNode::Scan { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::AlterTable { .. } => false,
+        PlanNode::Scan { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::AlterTable { .. } | PlanNode::DropTable { .. } => false,
     }
 }
 
@@ -178,6 +178,7 @@ fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
         PlanNode::CreateTable { database, .. } => Some(database.clone()),
         PlanNode::CreateTableAs { database, .. } => Some(database.clone()),
         PlanNode::AlterTable { database, .. } => Some(database.clone()),
+        PlanNode::DropTable { database, .. } => Some(database.clone()),
         PlanNode::InlineData { .. } | PlanNode::Empty => None,
     }
 }
@@ -262,7 +263,7 @@ fn collect_single_db_query(node: &PlanNode) -> Option<(String, DatabaseKind, Que
             });
             Some((ldb_name, ldb_kind, q))
         }
-        PlanNode::Union { .. } | PlanNode::SemiJoinFetch { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::CreateTableAs { .. } | PlanNode::AlterTable { .. } => None,
+        PlanNode::Union { .. } | PlanNode::SemiJoinFetch { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::CreateTableAs { .. } | PlanNode::AlterTable { .. } | PlanNode::DropTable { .. } => None,
     }
 }
 
@@ -561,6 +562,23 @@ async fn execute_node(
                 elapsed: std::time::Duration::default(),
                 rows_affected: total,
             })
+        }
+        PlanNode::DropTable { database, sql } => {
+            let adapter = adapters.get(&database.0).ok_or_else(|| {
+                RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
+            })?;
+
+            if sql.is_empty() {
+                return Ok(QueryResult {
+                    columns: vec!["message".to_string()],
+                    column_sources: vec![None],
+                    rows: vec![vec![Value::String("no operation performed".to_string())]],
+                    elapsed: std::time::Duration::default(),
+                    rows_affected: 0,
+                });
+            }
+
+            adapter.execute(sql).await
         }
         PlanNode::Scan { source, .. } => {
             if let SourceKind::CteRef(_) = &source.kind {

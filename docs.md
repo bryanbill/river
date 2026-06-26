@@ -1261,6 +1261,38 @@ alter table users rename to customers
 alter table users@pg add column notes string
 ```
 
+### DROP TABLE
+
+Remove a table from the database:
+
+```sql
+drop table users
+```
+
+With IF EXISTS (safe for scripts):
+
+```sql
+drop table if exists temp_logs
+```
+
+With CASCADE (drop dependent objects):
+
+```sql
+drop table users cascade
+```
+
+With RESTRICT (default — refuse if dependencies exist):
+
+```sql
+drop table users restrict
+```
+
+On a specific connection or schema:
+
+```sql
+drop table if exists archive.logs@pg cascade
+```
+
 ### Persisting Query Results — `>>`
 
 Save the results of any query to a table using `>>`:
@@ -1302,6 +1334,9 @@ insert if exists on conflict ignore
 | Alter column type       | `alter table t alter column col type ...`      | `ALTER TABLE t ALTER COLUMN ...`  |
 | Rename column           | `alter table t rename column col to new`       | `ALTER TABLE t RENAME COLUMN ...` |
 | Rename table            | `alter table t rename to new`                  | `ALTER TABLE t RENAME TO ...`     |
+| Drop table              | `drop table t`                                 | `DROP TABLE t`                    |
+| Drop if exists          | `drop table if exists t`                       | `DROP TABLE IF EXISTS t`          |
+| Drop cascade            | `drop table t cascade`                         | `DROP TABLE t CASCADE`            |
 | Update                  | `update table set ... where ...`               | `UPDATE table SET ... WHERE ...`  |
 | Delete                  | `remove table where ...`                       | `DELETE FROM table WHERE ...`     |
 
@@ -1457,10 +1492,12 @@ limit N offset M
 | `alter`                                   | ALTER TABLE              |
 | `add`                                     | ALTER TABLE ADD COLUMN   |
 | `column`                                  | ALTER TABLE column ref   |
-| `drop`                                    | ALTER TABLE DROP COLUMN  |
+| `drop`                                    | DROP TABLE / DROP COLUMN |
 | `rename`                                  | ALTER TABLE RENAME       |
 | `to`                                      | ALTER TABLE RENAME TO    |
 | `type`                                    | ALTER COLUMN TYPE        |
+| `cascade`                                 | DROP TABLE CASCADE       |
+| `restrict`                                | DROP TABLE RESTRICT      |
 | `describe`                                | Show table schema        |
 | `show tables`                             | List tables              |
 

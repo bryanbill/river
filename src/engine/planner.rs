@@ -99,6 +99,10 @@ pub enum PlanNode {
         database: (String, DatabaseKind),
         sql: String,
     },
+    DropTable {
+        database: (String, DatabaseKind),
+        sql: String,
+    },
     Empty,
 }
 
@@ -188,6 +192,7 @@ fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
         PlanNode::CreateTable { database, .. } => Some(database.clone()),
         PlanNode::CreateTableAs { database, .. } => Some(database.clone()),
         PlanNode::AlterTable { database, .. } => Some(database.clone()),
+        PlanNode::DropTable { database, .. } => Some(database.clone()),
         PlanNode::InlineData { .. } | PlanNode::Empty => None,
     }
 }
@@ -547,6 +552,31 @@ pub fn plan_statement(
                                 sql,
                             },
                         }
+                    }
+                }
+                None => QueryPlan {
+                    root: PlanNode::Empty,
+                },
+            }
+        }
+        Statement::DropTable(dt) => {
+            let db = resolve_connection(&dt.connection, source_db);
+            match db {
+                Some((db_name, db_kind)) => {
+                    let sql = if db_kind == DatabaseKind::MongoDB {
+                        format!(
+                            r#"{{"database":"","collection":"{}","drop":true}}"#,
+                            dt.table
+                        )
+                    } else {
+                        let dialect = dialect_for_kind(&db_kind);
+                        crate::engine::translator::translate_drop_table(dt, &*dialect)
+                    };
+                    QueryPlan {
+                        root: PlanNode::DropTable {
+                            database: (db_name, db_kind),
+                            sql,
+                        },
                     }
                 }
                 None => QueryPlan {
@@ -923,6 +953,12 @@ fn format_node(node: &PlanNode, lines: &mut Vec<String>, prefix: String, is_last
                 database.0, database.1
             ));
         }
+        PlanNode::DropTable { database, sql } => {
+            lines.push(format!(
+                "{connector}DropTable @ {}:{:?} — {sql}",
+                database.0, database.1
+            ));
+        }
         PlanNode::Empty => {
             lines.push(format!("{connector}(empty plan)"));
         }
@@ -1060,6 +1096,9 @@ fn collect_databases(node: &PlanNode, out: &mut Vec<(String, DatabaseKind)>) {
             out.push(database.clone());
         }
         PlanNode::AlterTable { database, .. } => {
+            out.push(database.clone());
+        }
+        PlanNode::DropTable { database, .. } => {
             out.push(database.clone());
         }
         PlanNode::InlineData { .. } | PlanNode::Empty => {}
