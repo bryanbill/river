@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         config = %cli.config,
-        "River v0.3.0 — starting..."
+        "River v0.5.0 — starting..."
     );
 
     let connections = load_config(&cli.config)?;

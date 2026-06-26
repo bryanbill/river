@@ -135,3 +135,31 @@ async fn same_table_different_dbs_count_match() {
     assert_eq!(pg.rows[0][0], mysql.rows[0][0]);
     assert_eq!(pg.rows[0][0], sqlite.rows[0][0]);
 }
+
+// ── Qualified Column Resolution in Cross-DB Triple Joins ───────────────────
+
+#[tokio::test]
+async fn cross_db_triple_join_qualified_columns() {
+    let ctx = TestContext::new().await;
+    let result = execute_river(
+        &ctx,
+        r#"find [u.id as user_id, o.id as order_id, oi.order_id as oi_order_id]
+           from users@pg as u
+           join orders@mysql as o on u.id = o.user_id
+           join order_items@sqlite as oi on o.id = oi.order_id
+           limit 20"#,
+    )
+    .await
+    .unwrap();
+    assert_row_count(&result, 20);
+    assert_no_nulls(&result, "user_id");
+    assert_no_nulls(&result, "order_id");
+    assert_no_nulls(&result, "oi_order_id");
+    // Verify that o.id == oi.order_id for every row (qualified resolution works)
+    let order_id_col = result.columns.iter().position(|c| c == "order_id").unwrap();
+    let oi_order_id_col = result.columns.iter().position(|c| c == "oi_order_id").unwrap();
+    for row in &result.rows {
+        assert_eq!(row[order_id_col], row[oi_order_id_col],
+            "Qualified resolution failed: o.id should equal oi.order_id");
+    }
+}

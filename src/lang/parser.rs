@@ -104,6 +104,13 @@ fn ident_or_keyword() -> impl Parser<Spanned, String, Error = PErr> {
         Token::Primary => Ok("primary".to_string()),
         Token::Key => Ok("key".to_string()),
         Token::Default_ => Ok("default".to_string()),
+        Token::Alter => Ok("alter".to_string()),
+        Token::Add => Ok("add".to_string()),
+        Token::Column => Ok("column".to_string()),
+        Token::Drop => Ok("drop".to_string()),
+        Token::Rename => Ok("rename".to_string()),
+        Token::To => Ok("to".to_string()),
+        Token::Type => Ok("type".to_string()),
         _ => Err(Simple::custom(s, "expected identifier")),
     })
 }
@@ -1114,7 +1121,10 @@ pub fn parser() -> Parser_<Vec<Statement>> {
                     default,
                     primary_key,
                 }
-            });
+            })
+            .boxed();
+
+        let column_def2 = column_def.clone();
 
         let create_table = tok(Token::Create)
             .ignore_then(tok(Token::Table))
@@ -1233,7 +1243,7 @@ pub fn parser() -> Parser_<Vec<Statement>> {
             .ignore_then(source_name())
             .then(
                 tok(Token::Where)
-                    .ignore_then(expr_p)
+                    .ignore_then(expr_p.clone())
                     .or_not(),
             )
             .map(|((schema, table, conn), filter)| {
@@ -1242,6 +1252,108 @@ pub fn parser() -> Parser_<Vec<Statement>> {
                     connection: conn,
                     schema,
                     filter,
+                })
+            });
+
+        let alter_table = tok(Token::Alter)
+            .ignore_then(tok(Token::Table))
+            .ignore_then(source_name())
+            .then({
+                let add_col = tok(Token::Add)
+                    .ignore_then(tok(Token::Column).or_not())
+                    .ignore_then(column_def2)
+                    .map(AlterAction::AddColumn);
+
+                let drop_col = tok(Token::Drop)
+                    .ignore_then(tok(Token::Column).or_not())
+                    .ignore_then(ident_or_keyword())
+                    .map(|name| AlterAction::DropColumn { name });
+
+                let alter_col_body = tok(Token::Alter)
+                    .ignore_then(tok(Token::Column).or_not())
+                    .ignore_then(ident_or_keyword())
+                    .then(
+                        choice((
+                            tok(Token::Type)
+                                .ignore_then(data_type())
+                                .then(
+                                    tok(Token::Not)
+                                        .ignore_then(tok(Token::Null))
+                                        .or_not()
+                                        .map(|nn| nn.is_some()),
+                                )
+                                .then(
+                                    tok(Token::Default_)
+                                        .ignore_then(expr_p.clone())
+                                        .or_not(),
+                                )
+                                .map(|((data_type, not_null), default)| {
+                                    AlterAction::AlterColumn {
+                                        name: String::new(),
+                                        data_type: Some(data_type),
+                                        nullable: Some(!not_null),
+                                        default,
+                                        drop_default: false,
+                                    }
+                                })
+                                .boxed(),
+                            tok(Token::Drop)
+                                .ignore_then(tok(Token::Default_))
+                                .map(|_| AlterAction::AlterColumn {
+                                    name: String::new(),
+                                    data_type: None,
+                                    nullable: None,
+                                    default: None,
+                                    drop_default: true,
+                                })
+                                .boxed(),
+                            tok(Token::Not)
+                                .ignore_then(tok(Token::Null))
+                                .map(|_| AlterAction::AlterColumn {
+                                    name: String::new(),
+                                    data_type: None,
+                                    nullable: Some(false),
+                                    default: None,
+                                    drop_default: false,
+                                })
+                                .boxed(),
+                        ))
+                        .boxed(),
+                    )
+                    .map(|(name, mut action)| {
+                        match &mut action {
+                            AlterAction::AlterColumn { name: n, .. } => *n = name,
+                            _ => {}
+                        }
+                        action
+                    });
+
+                let rename_col = tok(Token::Rename)
+                    .ignore_then(tok(Token::Column).or_not())
+                    .ignore_then(ident_or_keyword())
+                    .then_ignore(tok(Token::To))
+                    .then(ident_or_keyword())
+                    .map(|(from, to)| AlterAction::RenameColumn { from, to });
+
+                let rename_tbl = tok(Token::Rename)
+                    .ignore_then(tok(Token::To))
+                    .ignore_then(ident_or_keyword())
+                    .map(|to| AlterAction::RenameTable { to });
+
+                choice((
+                    add_col.boxed(),
+                    drop_col.boxed(),
+                    rename_col.boxed(),
+                    rename_tbl.boxed(),
+                    alter_col_body.boxed(),
+                ))
+            })
+            .map(|((schema, table, conn), action)| {
+                Statement::AlterTable(AlterTable {
+                    table,
+                    connection: conn,
+                    schema,
+                    action,
                 })
             });
 
@@ -1269,6 +1381,7 @@ pub fn parser() -> Parser_<Vec<Statement>> {
         choice((
             create_table.boxed(),
             create_table_as.boxed(),
+            alter_table.boxed(),
             query_or_setop.boxed(),
             with_stmt.boxed(),
             explain.boxed(),

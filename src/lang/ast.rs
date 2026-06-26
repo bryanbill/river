@@ -13,6 +13,7 @@ pub enum Statement {
     ShowTables(Option<String>),
     CreateTable(CreateTable),
     CreateTableAs(CreateTableAs),
+    AlterTable(AlterTable),
     ParamAssign {
         name: String,
         value: Expression,
@@ -392,6 +393,36 @@ pub struct ColumnDef {
     pub nullable: bool,
     pub default: Option<Expression>,
     pub primary_key: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlterAction {
+    AddColumn(ColumnDef),
+    DropColumn {
+        name: String,
+    },
+    AlterColumn {
+        name: String,
+        data_type: Option<DataType>,
+        nullable: Option<bool>,
+        default: Option<Expression>,
+        drop_default: bool,
+    },
+    RenameColumn {
+        from: String,
+        to: String,
+    },
+    RenameTable {
+        to: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterTable {
+    pub table: String,
+    pub connection: Option<String>,
+    pub schema: Option<String>,
+    pub action: AlterAction,
 }
 
 #[derive(Debug, Clone, PartialEq)]

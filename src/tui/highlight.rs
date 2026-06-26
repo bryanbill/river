@@ -39,7 +39,9 @@ pub fn token_kind(token: &Token) -> TokenKind {
         | Token::Insert | Token::If | Token::Conflict | Token::Ignore | Token::Replace
         | Token::Primary | Token::Key | Token::Default_
         | Token::Explain | Token::Describe | Token::Show | Token::Tables
-        | Token::Over | Token::Partition | Token::Window => TokenKind::Keyword,
+        | Token::Over | Token::Partition | Token::Window
+        | Token::Alter | Token::Add | Token::Column | Token::Drop | Token::Rename | Token::To
+        | Token::Type => TokenKind::Keyword,
 
         Token::Coalesce | Token::Nullif | Token::Ifnull | Token::Cast | Token::Now
         | Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max

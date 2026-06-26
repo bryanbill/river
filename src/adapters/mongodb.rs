@@ -108,6 +108,7 @@ impl DatabaseAdapter for MongoAdapter {
             db.create_collection(coll_name).await?;
             return Ok(QueryResult {
                 columns: vec![],
+                column_sources: vec![],
                 rows: vec![],
                 elapsed: start.elapsed(),
                 rows_affected: 0,
@@ -127,6 +128,7 @@ impl DatabaseAdapter for MongoAdapter {
             if bson_docs.is_empty() {
                 return Ok(QueryResult {
                     columns: vec![],
+                    column_sources: vec![],
                     rows: vec![],
                     elapsed: start.elapsed(),
                     rows_affected: 0,
@@ -140,6 +142,7 @@ impl DatabaseAdapter for MongoAdapter {
                         Ok(r) => {
                             return Ok(QueryResult {
                                 columns: vec![],
+                                column_sources: vec![],
                                 rows: vec![],
                                 elapsed: start.elapsed(),
                                 rows_affected: r.inserted_ids.len() as u64,
@@ -148,6 +151,7 @@ impl DatabaseAdapter for MongoAdapter {
                         Err(e) if e.to_string().contains("duplicate") => {
                             return Ok(QueryResult {
                                 columns: vec![],
+                                column_sources: vec![],
                                 rows: vec![],
                                 elapsed: start.elapsed(),
                                 rows_affected: 0,
@@ -172,6 +176,7 @@ impl DatabaseAdapter for MongoAdapter {
                     }
                     return Ok(QueryResult {
                         columns: vec![],
+                        column_sources: vec![],
                         rows: vec![],
                         elapsed: start.elapsed(),
                         rows_affected: replaced,
@@ -181,6 +186,7 @@ impl DatabaseAdapter for MongoAdapter {
                     let result = collection.insert_many(bson_docs).await?;
                     return Ok(QueryResult {
                         columns: vec![],
+                        column_sources: vec![],
                         rows: vec![],
                         elapsed: start.elapsed(),
                         rows_affected: result.inserted_ids.len() as u64,
@@ -199,6 +205,7 @@ impl DatabaseAdapter for MongoAdapter {
             let result = collection.delete_many(delete_filter).await?;
             return Ok(QueryResult {
                 columns: vec![],
+                column_sources: vec![],
                 rows: vec![],
                 elapsed: start.elapsed(),
                 rows_affected: result.deleted_count,
@@ -225,6 +232,7 @@ impl DatabaseAdapter for MongoAdapter {
             let result = collection.update_many(filter, set_doc).await?;
             return Ok(QueryResult {
                 columns: vec![],
+                column_sources: vec![],
                 rows: vec![],
                 elapsed: start.elapsed(),
                 rows_affected: result.modified_count,
@@ -261,6 +269,7 @@ impl DatabaseAdapter for MongoAdapter {
         } else {
             docs[0].keys().map(|k| k.to_string()).collect()
         };
+        let num_cols = columns.len();
 
         let rows: Vec<Vec<Value>> = docs
             .iter()
@@ -283,6 +292,7 @@ impl DatabaseAdapter for MongoAdapter {
 
         Ok(QueryResult {
             columns,
+            column_sources: vec![None; num_cols],
             rows,
             elapsed,
             rows_affected,

@@ -95,6 +95,10 @@ pub enum PlanNode {
         target_schema: Option<String>,
         on_conflict: Option<ConflictAction>,
     },
+    AlterTable {
+        database: (String, DatabaseKind),
+        sql: String,
+    },
     Empty,
 }
 
@@ -183,6 +187,7 @@ fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
         PlanNode::Dml { database, .. } => Some(database.clone()),
         PlanNode::CreateTable { database, .. } => Some(database.clone()),
         PlanNode::CreateTableAs { database, .. } => Some(database.clone()),
+        PlanNode::AlterTable { database, .. } => Some(database.clone()),
         PlanNode::InlineData { .. } | PlanNode::Empty => None,
     }
 }
@@ -515,6 +520,33 @@ pub fn plan_statement(
                             target_schema: cta.schema.clone(),
                             on_conflict: cta.on_conflict.clone(),
                         },
+                    }
+                }
+                None => QueryPlan {
+                    root: PlanNode::Empty,
+                },
+            }
+        }
+        Statement::AlterTable(at) => {
+            let db = resolve_connection(&at.connection, source_db);
+            match db {
+                Some((db_name, db_kind)) => {
+                    if db_kind == DatabaseKind::MongoDB {
+                        QueryPlan {
+                            root: PlanNode::AlterTable {
+                                database: (db_name, db_kind),
+                                sql: String::new(),
+                            },
+                        }
+                    } else {
+                        let dialect = dialect_for_kind(&db_kind);
+                        let sql = crate::engine::translator::translate_alter_table(at, &*dialect);
+                        QueryPlan {
+                            root: PlanNode::AlterTable {
+                                database: (db_name, db_kind),
+                                sql,
+                            },
+                        }
                     }
                 }
                 None => QueryPlan {
@@ -885,6 +917,12 @@ fn format_node(node: &PlanNode, lines: &mut Vec<String>, prefix: String, is_last
             ));
             format_node(query_plan, lines, child_prefix, true);
         }
+        PlanNode::AlterTable { database, sql } => {
+            lines.push(format!(
+                "{connector}AlterTable @ {}:{:?} — {sql}",
+                database.0, database.1
+            ));
+        }
         PlanNode::Empty => {
             lines.push(format!("{connector}(empty plan)"));
         }
@@ -1019,6 +1057,9 @@ fn collect_databases(node: &PlanNode, out: &mut Vec<(String, DatabaseKind)>) {
             query_plan, database, ..
         } => {
             collect_databases(query_plan, out);
+            out.push(database.clone());
+        }
+        PlanNode::AlterTable { database, .. } => {
             out.push(database.clone());
         }
         PlanNode::InlineData { .. } | PlanNode::Empty => {}

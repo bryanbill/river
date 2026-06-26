@@ -34,7 +34,7 @@ fn plan_has_limit(node: &PlanNode) -> bool {
         | PlanNode::Union { left, right, .. } => plan_has_limit(left) || plan_has_limit(right),
         PlanNode::SemiJoinFetch { build, .. } => plan_has_limit(build),
         PlanNode::CreateTableAs { query_plan, .. } => plan_has_limit(query_plan),
-        PlanNode::Scan { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } => false,
+        PlanNode::Scan { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::AlterTable { .. } => false,
     }
 }
 
@@ -119,13 +119,18 @@ async fn execute_on_db(
     db_name: &str,
     db_kind: &DatabaseKind,
     query: &Query,
+    source_alias: Option<&str>,
     adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
 ) -> Result<QueryResult, RiverError> {
     let adapter = adapters.get(db_name).ok_or_else(|| {
         RiverError::Unsupported(format!("no adapter connected for '{}'", db_name))
     })?;
     let native = translate_for_kind(query, db_kind);
-    adapter.execute(&native).await
+    let mut result = adapter.execute(&native).await?;
+    if let Some(alias) = source_alias {
+        result.column_sources = vec![Some(alias.to_string()); result.columns.len()];
+    }
+    Ok(result)
 }
 
 fn translate_for_kind(query: &Query, kind: &DatabaseKind) -> String {
@@ -172,7 +177,20 @@ fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
         PlanNode::Dml { database, .. } => Some(database.clone()),
         PlanNode::CreateTable { database, .. } => Some(database.clone()),
         PlanNode::CreateTableAs { database, .. } => Some(database.clone()),
+        PlanNode::AlterTable { database, .. } => Some(database.clone()),
         PlanNode::InlineData { .. } | PlanNode::Empty => None,
+    }
+}
+
+fn find_source_alias(node: &PlanNode) -> Option<String> {
+    match node {
+        PlanNode::Scan { source, .. } => source.alias.clone().or_else(|| Some(source.name.clone())),
+        PlanNode::Filter { input, .. }
+        | PlanNode::Project { input, .. }
+        | PlanNode::Order { input, .. }
+        | PlanNode::Limit { input, .. }
+        | PlanNode::Distinct { input, .. } => find_source_alias(input),
+        _ => None,
     }
 }
 
@@ -244,7 +262,7 @@ fn collect_single_db_query(node: &PlanNode) -> Option<(String, DatabaseKind, Que
             });
             Some((ldb_name, ldb_kind, q))
         }
-        PlanNode::Union { .. } | PlanNode::SemiJoinFetch { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::CreateTableAs { .. } => None,
+        PlanNode::Union { .. } | PlanNode::SemiJoinFetch { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::CreateTableAs { .. } | PlanNode::AlterTable { .. } => None,
     }
 }
 
@@ -254,7 +272,8 @@ async fn execute_node(
     bounded: bool,
 ) -> Result<QueryResult, RiverError> {
     if let Some((db_name, db_kind, query)) = collect_single_db_query(node) {
-        return execute_on_db(&db_name, &db_kind, &query, adapters).await;
+        let source_alias = find_source_alias(node);
+        return execute_on_db(&db_name, &db_kind, &query, source_alias.as_deref(), adapters).await;
     }
 
     match node {
@@ -300,7 +319,8 @@ async fn execute_node(
                 {
                     rquery.limit = *limit;
                     rquery.offset = Some(0);
-                    execute_on_db(&rdb_name, &rdb_kind, &rquery, adapters).await?
+                    let right_alias = find_source_alias(right);
+                    execute_on_db(&rdb_name, &rdb_kind, &rquery, right_alias.as_deref(), adapters).await?
                 } else {
                     Box::pin(execute_node(right, adapters, true)).await?
                 }
@@ -347,6 +367,7 @@ async fn execute_node(
         }
         PlanNode::InlineData { columns, rows } => Ok(QueryResult {
             columns: columns.clone(),
+            column_sources: vec![None; columns.len()],
             rows: rows.clone(),
             elapsed: std::time::Duration::default(),
             rows_affected: rows.len() as u64,
@@ -376,6 +397,7 @@ async fn execute_node(
                 .collect();
             Ok(QueryResult {
                 columns: vec!["table_name".to_string()],
+                column_sources: vec![None],
                 rows,
                 elapsed: std::time::Duration::default(),
                 rows_affected: 0,
@@ -405,6 +427,7 @@ async fn execute_node(
                     "nullable".to_string(),
                     "is_pk".to_string(),
                 ],
+                column_sources: vec![None; 4],
                 rows,
                 elapsed: std::time::Duration::default(),
                 rows_affected: 0,
@@ -434,6 +457,7 @@ async fn execute_node(
             if query_result.rows.is_empty() {
                 return Ok(QueryResult {
                     columns: vec![],
+                    column_sources: vec![],
                     rows: vec![],
                     elapsed: std::time::Duration::default(),
                     rows_affected: 0,
@@ -501,6 +525,43 @@ async fn execute_node(
             }
         }
         PlanNode::Empty => Ok(empty_result()),
+        PlanNode::AlterTable { database, sql } => {
+            if database.1 == DatabaseKind::MongoDB {
+                return Err(RiverError::Unsupported(
+                    "ALTER TABLE is not supported on MongoDB".into(),
+                ));
+            }
+            if sql.is_empty() {
+                return Ok(QueryResult {
+                    columns: vec![],
+                    column_sources: vec![],
+                    rows: vec![],
+                    elapsed: std::time::Duration::default(),
+                    rows_affected: 0,
+                });
+            }
+            let adapter = adapters.get(&database.0).ok_or_else(|| {
+                RiverError::Unsupported(format!("no adapter connected for '{}'", database.0))
+            })?;
+
+            let statements: Vec<&str> = sql
+                .split(';')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let mut total = 0u64;
+            for stmt_sql in &statements {
+                let result = adapter.execute(stmt_sql).await?;
+                total += result.rows_affected.max(1);
+            }
+            Ok(QueryResult {
+                columns: vec![],
+                column_sources: vec![],
+                rows: vec![],
+                elapsed: std::time::Duration::default(),
+                rows_affected: total,
+            })
+        }
         PlanNode::Scan { source, .. } => {
             if let SourceKind::CteRef(_) = &source.kind {
                 Err(RiverError::Unsupported(
@@ -536,15 +597,13 @@ async fn execute_semi_join_fetch(
     }
 
     // 2. Extract distinct join keys from build result
-    let build_key_col = match build_key {
-        Expression::Ident(name) => name.clone(),
-        Expression::QualifiedIdent { field, .. } => field.clone(),
-        _ => {
-            return Err(RiverError::Unsupported(
-                "SemiJoinFetch requires a simple column reference as build key".into(),
-            ));
-        }
-    };
+    let build_key_idx = resolve_col_idx(build_key, &build_result.columns, &build_result.column_sources)
+        .ok_or_else(|| {
+            RiverError::Unsupported(format!(
+                "Build key column {:?} not found in build result columns: {:?}",
+                build_key, build_result.columns
+            ))
+        })?;
     let probe_key_col = match probe_key {
         Expression::Ident(name) => name.clone(),
         Expression::QualifiedIdent { field, .. } => field.clone(),
@@ -554,17 +613,6 @@ async fn execute_semi_join_fetch(
             ));
         }
     };
-
-    let build_key_idx = build_result
-        .columns
-        .iter()
-        .position(|c| c == &build_key_col)
-        .ok_or_else(|| {
-            RiverError::Unsupported(format!(
-                "Build key column '{}' not found in build result columns: {:?}",
-                build_key_col, build_result.columns
-            ))
-        })?;
 
     let mut distinct_keys: Vec<Value> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -625,7 +673,8 @@ async fn execute_semi_join_fetch(
     }
 
     let probe_result = QueryResult {
-        columns: probe_columns,
+        columns: probe_columns.clone(),
+        column_sources: vec![Some(probe_source.alias.clone().unwrap_or_else(|| probe_source.name.clone())); probe_columns.len()],
         rows: probe_rows,
         elapsed: std::time::Duration::default(),
         rows_affected: 0,
@@ -638,6 +687,7 @@ async fn execute_semi_join_fetch(
 fn empty_result() -> QueryResult {
     QueryResult {
         columns: vec![],
+        column_sources: vec![],
         rows: vec![],
         elapsed: std::time::Duration::default(),
         rows_affected: 0,
@@ -655,7 +705,14 @@ fn join_results(
     limit: Option<u64>,
 ) -> Result<QueryResult, RiverError> {
     let can_hash = matches!(strategy, JoinStrategy::Hash | JoinStrategy::Auto)
-        && resolve_equi_columns(condition, &left.columns, &right.columns).is_some();
+        && resolve_equi_columns(
+            condition,
+            &left.columns,
+            &left.column_sources,
+            &right.columns,
+            &right.column_sources,
+        )
+        .is_some();
 
     if can_hash {
         hash_join(left, right, condition, join_kind)
@@ -667,7 +724,9 @@ fn join_results(
 fn resolve_equi_columns(
     condition: &Expression,
     left_cols: &[String],
+    left_sources: &[Option<String>],
     right_cols: &[String],
+    right_sources: &[Option<String>],
 ) -> Option<(usize, usize)> {
     match condition {
         Expression::BinaryOp {
@@ -675,20 +734,15 @@ fn resolve_equi_columns(
             left,
             right,
         } => {
-            let li = find_col_idx(left, left_cols, right_cols)?;
-            let ri = find_col_idx(right, left_cols, right_cols)?;
+            let li = find_col_idx(left, left_cols, left_sources, right_cols, right_sources)?;
+            let ri = find_col_idx(right, left_cols, left_sources, right_cols, right_sources)?;
             if li.1 != ri.1 {
-                // Already on opposite sides
                 if li.1 {
                     Some((ri.0, li.0))
                 } else {
                     Some((li.0, ri.0))
                 }
             } else {
-                // Both resolved to the same side. This happens when the column
-                // name exists in both tables (e.g., `u.id = m.id` where both
-                // have an "id" column). In this case, assume the left expression
-                // refers to the left table and the right expression to the right.
                 let l_name = extract_field_name(left)?;
                 let r_name = extract_field_name(right)?;
                 let l_idx = left_cols.iter().position(|c| c == l_name)?;
@@ -711,17 +765,61 @@ fn extract_field_name(expr: &Expression) -> Option<&str> {
 fn find_col_idx(
     expr: &Expression,
     left_cols: &[String],
+    left_sources: &[Option<String>],
     right_cols: &[String],
+    right_sources: &[Option<String>],
 ) -> Option<(usize, bool)> {
-    let name = match expr {
-        Expression::Ident(n) => n,
-        Expression::QualifiedIdent { field, .. } => field,
-        _ => return None,
+    let resolve_exact = |cols: &[String], sources: &[Option<String>], table: &str, field: &str| -> Option<usize> {
+        cols.iter()
+            .enumerate()
+            .position(|(i, c)| {
+                c == field && sources.get(i).and_then(|s| s.as_deref()) == Some(table)
+            })
     };
-    if let Some(i) = left_cols.iter().position(|c| c == name) {
-        Some((i, false))
-    } else {
-        right_cols.iter().position(|c| c == name).map(|i| (i, true))
+    let resolve_name = |cols: &[String], name: &str| -> Option<usize> {
+        cols.iter().position(|c| c == name)
+    };
+
+    match expr {
+        Expression::Ident(name) => {
+            if let Some(i) = resolve_name(left_cols, name) {
+                Some((i, false))
+            } else {
+                resolve_name(right_cols, name).map(|i| (i, true))
+            }
+        }
+        Expression::QualifiedIdent { table, field } => {
+            if let Some(i) = resolve_exact(left_cols, left_sources, table, field) {
+                Some((i, false))
+            } else if let Some(i) = resolve_exact(right_cols, right_sources, table, field) {
+                Some((i, true))
+            } else if let Some(i) = resolve_name(left_cols, field) {
+                Some((i, false))
+            } else {
+                resolve_name(right_cols, field).map(|i| (i, true))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn resolve_col_idx(
+    expr: &Expression,
+    columns: &[String],
+    sources: &[Option<String>],
+) -> Option<usize> {
+    match expr {
+        Expression::Ident(name) => columns.iter().position(|c| c == name),
+        Expression::QualifiedIdent { table, field } => {
+            columns
+                .iter()
+                .enumerate()
+                .position(|(i, c)| {
+                    c == field && sources.get(i).and_then(|s| s.as_deref()) == Some(table.as_str())
+                })
+                .or_else(|| columns.iter().position(|c| c == field))
+        }
+        _ => None,
     }
 }
 
@@ -732,7 +830,13 @@ fn hash_join(
     join_kind: JoinKind,
 ) -> Result<QueryResult, RiverError> {
     let (left_key_idx, right_key_idx) =
-        resolve_equi_columns(condition, &left.columns, &right.columns)
+        resolve_equi_columns(
+            condition,
+            &left.columns,
+            &left.column_sources,
+            &right.columns,
+            &right.column_sources,
+        )
             .ok_or_else(|| {
                 RiverError::Unsupported("hash join requires equi-join condition".into())
             })?;
@@ -754,10 +858,10 @@ fn hash_join(
         hash_map.entry(key).or_default().push(i);
     }
 
-    let columns = if swapped {
-        merge_col_names(&probe.columns, &build.columns)
+    let (columns, column_sources) = if swapped {
+        merge_columns(&probe.columns, &probe.column_sources, &build.columns, &build.column_sources)
     } else {
-        merge_col_names(&build.columns, &probe.columns)
+        merge_columns(&build.columns, &build.column_sources, &probe.columns, &probe.column_sources)
     };
 
     let mut rows: Vec<Vec<Value>> = Vec::new();
@@ -819,6 +923,7 @@ fn hash_join(
 
     Ok(QueryResult {
         columns,
+        column_sources,
         rows,
         elapsed: std::time::Duration::default(),
         rows_affected: 0,
@@ -832,12 +937,14 @@ fn nested_loop_join(
     join_kind: JoinKind,
     limit: Option<u64>,
 ) -> Result<QueryResult, RiverError> {
-    let columns = merge_col_names(&left.columns, &right.columns);
+    let (columns, column_sources) = merge_columns(
+        &left.columns, &left.column_sources,
+        &right.columns, &right.column_sources,
+    );
     let right_col_count = right.columns.len();
     let left_col_count = left.columns.len();
     let mut rows: Vec<Vec<Value>> = Vec::new();
 
-    // Cross join: compute cartesian product directly (no condition evaluation needed)
     if join_kind == JoinKind::Cross {
         'outer: for l_row in &left.rows {
             for r_row in &right.rows {
@@ -850,6 +957,7 @@ fn nested_loop_join(
         }
         return Ok(QueryResult {
             columns,
+            column_sources,
             rows,
             elapsed: std::time::Duration::default(),
             rows_affected: 0,
@@ -862,7 +970,7 @@ fn nested_loop_join(
     for (li, l_row) in left.rows.iter().enumerate() {
         for (ri, r_row) in right.rows.iter().enumerate() {
             let merged = merge_vals(l_row, r_row);
-            if eval_expr_bool(condition, &columns, &merged) {
+            if eval_expr_bool(condition, &columns, &column_sources, &merged) {
                 rows.push(merged.clone());
                 left_matched[li] = true;
                 right_matched[ri] = true;
@@ -871,6 +979,7 @@ fn nested_loop_join(
                 && rows.len() >= lim as usize {
                     return Ok(QueryResult {
                         columns,
+                        column_sources,
                         rows,
                         elapsed: std::time::Duration::default(),
                         rows_affected: 0,
@@ -902,6 +1011,7 @@ fn nested_loop_join(
 
     Ok(QueryResult {
         columns,
+        column_sources,
         rows,
         elapsed: std::time::Duration::default(),
         rows_affected: 0,
@@ -914,11 +1024,12 @@ fn apply_filter(result: &QueryResult, condition: &Expression) -> Result<QueryRes
     let rows: Vec<Vec<Value>> = result
         .rows
         .iter()
-        .filter(|row| eval_expr_bool(condition, &result.columns, row))
+        .filter(|row| eval_expr_bool(condition, &result.columns, &result.column_sources, row))
         .cloned()
         .collect();
     Ok(QueryResult {
         columns: result.columns.clone(),
+        column_sources: result.column_sources.clone(),
         rows,
         elapsed: std::time::Duration::default(),
         rows_affected: 0,
@@ -932,13 +1043,21 @@ fn apply_projection(
     if fields.is_empty() {
         return Ok(result.clone());
     }
-    let (new_cols, indices): (Vec<String>, Vec<Option<usize>>) = fields
-        .iter()
-        .map(|p| match p {
+    let mut new_cols: Vec<String> = Vec::new();
+    let mut new_sources: Vec<Option<String>> = Vec::new();
+    let mut indices: Vec<Option<usize>> = Vec::new();
+    for p in fields {
+        match p {
             Projection::Wildcard => {
-                ("*".to_string(), None)
+                new_cols.push("*".to_string());
+                new_sources.push(None);
+                indices.push(None);
             }
-            Projection::QualifiedWildcard(_) => ("*".to_string(), None),
+            Projection::QualifiedWildcard(q) => {
+                new_cols.push("*".to_string());
+                new_sources.push(Some(q.clone()));
+                indices.push(None);
+            }
             Projection::Expr(expr, alias) => {
                 let name = alias.clone().unwrap_or_else(|| match expr {
                     Expression::Ident(n) => n.clone(),
@@ -946,21 +1065,36 @@ fn apply_projection(
                     Expression::Aggregate { .. } => agg_default_name(expr),
                     _ => "expr".to_string(),
                 });
-                let idx = match expr {
-                    Expression::Ident(n) | Expression::QualifiedIdent { field: n, .. } => {
-                        result.columns.iter().position(|c| c == n)
+                let (idx, src) = match expr {
+                    Expression::Ident(n) => {
+                        let i = result.columns.iter().position(|c| c == n);
+                        let s = i.and_then(|pos| result.column_sources.get(pos).cloned()).flatten();
+                        (i, s)
+                    }
+                    Expression::QualifiedIdent { table, field } => {
+                        let i = result.columns.iter()
+                            .enumerate()
+                            .position(|(pos, c)| {
+                                c == field && result.column_sources.get(pos)
+                                    .and_then(|s| s.as_deref()) == Some(table.as_str())
+                            })
+                            .or_else(|| result.columns.iter().position(|c| c == field));
+                        let s = i.and_then(|pos| result.column_sources.get(pos).cloned()).flatten();
+                        (i, s)
                     }
                     Expression::Aggregate { .. } => {
-                        result.columns.iter().position(|c| c == &name)
+                        let i = result.columns.iter().position(|c| c == &name);
+                        (i, None)
                     }
-                    _ => None,
+                    _ => (None, None),
                 };
-                (name, idx)
+                new_cols.push(name);
+                new_sources.push(src);
+                indices.push(idx);
             }
-        })
-        .unzip();
+        }
+    }
 
-    // Handle wildcards: if any projection is a wildcard, include all columns
     let has_wildcard = fields.iter().any(|p| matches!(p, Projection::Wildcard));
     if has_wildcard {
         return Ok(result.clone());
@@ -982,6 +1116,7 @@ fn apply_projection(
 
     Ok(QueryResult {
         columns: new_cols,
+        column_sources: new_sources,
         rows,
         elapsed: std::time::Duration::default(),
         rows_affected: 0,
@@ -995,8 +1130,8 @@ fn apply_order(
     let mut rows = result.rows.clone();
     rows.sort_by(|a, b| {
         for order in order_by {
-            let va = eval_expr(&order.expr, &result.columns, a);
-            let vb = eval_expr(&order.expr, &result.columns, b);
+            let va = eval_expr(&order.expr, &result.columns, &result.column_sources, a);
+            let vb = eval_expr(&order.expr, &result.columns, &result.column_sources, b);
             let cmp = cmp_values(&va, &vb);
             if cmp != std::cmp::Ordering::Equal {
                 return if order.direction == OrderDir::Desc {
@@ -1010,6 +1145,7 @@ fn apply_order(
     });
     Ok(QueryResult {
         columns: result.columns.clone(),
+        column_sources: result.column_sources.clone(),
         rows,
         elapsed: std::time::Duration::default(),
         rows_affected: 0,
@@ -1030,6 +1166,7 @@ fn apply_limit(
         .collect();
     Ok(QueryResult {
         columns: result.columns.clone(),
+        column_sources: result.column_sources.clone(),
         rows,
         elapsed: std::time::Duration::default(),
         rows_affected: 0,
@@ -1045,29 +1182,33 @@ fn apply_aggregate(
         return Ok(result.clone());
     }
 
-    // Build output column names
     let mut out_columns: Vec<String> = Vec::new();
+    let mut out_sources: Vec<Option<String>> = Vec::new();
     for gb in group_by {
         let name = match gb {
             Expression::Ident(n) => n.clone(),
             Expression::QualifiedIdent { field, .. } => field.clone(),
             _ => "expr".to_string(),
         };
+        let src = resolve_col_idx(gb, &result.columns, &result.column_sources)
+            .and_then(|i| result.column_sources.get(i).cloned())
+            .flatten();
         out_columns.push(name);
+        out_sources.push(src);
     }
     for (agg_expr, alias) in aggs {
         let name = alias.clone().unwrap_or_else(|| agg_default_name(agg_expr));
         out_columns.push(name);
+        out_sources.push(None);
     }
 
-    // Group rows by group-by key values
     let mut groups: HashMap<Vec<Value>, Vec<Vec<Value>>> = HashMap::new();
     let mut group_order: Vec<Vec<Value>> = Vec::new();
 
     for row in &result.rows {
         let key: Vec<Value> = group_by
             .iter()
-            .map(|gb| eval_expr(gb, &result.columns, row))
+            .map(|gb| eval_expr(gb, &result.columns, &result.column_sources, row))
             .collect();
         if !groups.contains_key(&key) {
             group_order.push(key.clone());
@@ -1075,28 +1216,27 @@ fn apply_aggregate(
         groups.entry(key).or_default().push(row.clone());
     }
 
-    // Compute aggregates per group
     let mut out_rows: Vec<Vec<Value>> = Vec::new();
     for key in &group_order {
         let group_rows = groups.get(key).unwrap();
         let mut out_row: Vec<Value> = key.clone();
         for (agg_expr, _) in aggs {
-            out_row.push(compute_aggregate(agg_expr, &result.columns, group_rows));
+            out_row.push(compute_aggregate(agg_expr, &result.columns, &result.column_sources, group_rows));
         }
         out_rows.push(out_row);
     }
 
-    // Global aggregate (no group-by): produce a single row even if input is empty
     if group_by.is_empty() && !aggs.is_empty() && out_rows.is_empty() {
         let mut out_row: Vec<Value> = Vec::new();
         for (agg_expr, _) in aggs {
-            out_row.push(compute_aggregate(agg_expr, &result.columns, &[]));
+            out_row.push(compute_aggregate(agg_expr, &result.columns, &result.column_sources, &[]));
         }
         out_rows.push(out_row);
     }
 
     Ok(QueryResult {
         columns: out_columns,
+        column_sources: out_sources,
         rows: out_rows,
         elapsed: std::time::Duration::default(),
         rows_affected: 0,
@@ -1118,7 +1258,7 @@ fn agg_default_name(expr: &Expression) -> String {
     }
 }
 
-fn compute_aggregate(expr: &Expression, columns: &[String], rows: &[Vec<Value>]) -> Value {
+fn compute_aggregate(expr: &Expression, columns: &[String], column_sources: &[Option<String>], rows: &[Vec<Value>]) -> Value {
     match expr {
         Expression::Aggregate {
             name,
@@ -1129,7 +1269,7 @@ fn compute_aggregate(expr: &Expression, columns: &[String], rows: &[Vec<Value>])
                 rows.iter().map(|_| Value::Int(1)).collect()
             } else {
                 rows.iter()
-                    .map(|r| eval_expr(&args[0], columns, r))
+                    .map(|r| eval_expr(&args[0], columns, column_sources, r))
                     .collect()
             };
 
@@ -1205,6 +1345,7 @@ fn apply_distinct(result: &QueryResult) -> Result<QueryResult, RiverError> {
         .collect();
     Ok(QueryResult {
         columns: result.columns.clone(),
+        column_sources: result.column_sources.clone(),
         rows,
         elapsed: std::time::Duration::default(),
         rows_affected: 0,
@@ -1221,13 +1362,17 @@ fn union_results(
     } else {
         right.columns.clone()
     };
+    let column_sources = if left.columns.len() >= right.columns.len() {
+        left.column_sources.clone()
+    } else {
+        right.column_sources.clone()
+    };
     let mut rows = left.rows.clone();
     for r_row in &right.rows {
         let mut aligned = r_row.clone();
         aligned.resize(columns.len(), Value::Null);
         rows.push(aligned);
     }
-    // Deduplicate if not UNION ALL
     let mut seen = std::collections::HashSet::new();
     let rows: Vec<Vec<Value>> = rows
         .into_iter()
@@ -1235,6 +1380,7 @@ fn union_results(
         .collect();
     Ok(QueryResult {
         columns,
+        column_sources,
         rows,
         elapsed: std::time::Duration::default(),
         rows_affected: 0,
@@ -1243,18 +1389,18 @@ fn union_results(
 
 // ── Expression evaluation ──────────────────────────────────────────────────
 
-fn eval_expr_bool(expr: &Expression, columns: &[String], row: &[Value]) -> bool {
-    matches!(eval_expr(expr, columns, row), Value::Bool(true))
+fn eval_expr_bool(expr: &Expression, columns: &[String], column_sources: &[Option<String>], row: &[Value]) -> bool {
+    matches!(eval_expr(expr, columns, column_sources, row), Value::Bool(true))
 }
 
-fn eval_expr(expr: &Expression, columns: &[String], row: &[Value]) -> Value {
+fn eval_expr(expr: &Expression, columns: &[String], column_sources: &[Option<String>], row: &[Value]) -> Value {
     match expr {
         Expression::String(s) => Value::String(s.clone()),
         Expression::Number(n) => Value::Float(*n),
         Expression::Integer(i) => Value::Int(*i),
         Expression::Boolean(b) => Value::Bool(*b),
         Expression::Null => Value::Null,
-        Expression::Ident(name) | Expression::QualifiedIdent { field: name, .. } => {
+        Expression::Ident(name) => {
             columns
                 .iter()
                 .position(|c| c == name)
@@ -1262,13 +1408,23 @@ fn eval_expr(expr: &Expression, columns: &[String], row: &[Value]) -> Value {
                 .cloned()
                 .unwrap_or(Value::Null)
         }
+        Expression::QualifiedIdent { table, field } => {
+            let idx = columns
+                .iter()
+                .enumerate()
+                .position(|(i, c)| {
+                    c == field && column_sources.get(i).and_then(|s| s.as_deref()) == Some(table.as_str())
+                })
+                .or_else(|| columns.iter().position(|c| c == field));
+            idx.and_then(|i| row.get(i)).cloned().unwrap_or(Value::Null)
+        }
         Expression::BinaryOp { op, left, right } => {
-            let l = eval_expr(left, columns, row);
-            let r = eval_expr(right, columns, row);
+            let l = eval_expr(left, columns, column_sources, row);
+            let r = eval_expr(right, columns, column_sources, row);
             eval_binary(op, &l, &r)
         }
         Expression::UnaryOp { op, expr } => {
-            let v = eval_expr(expr, columns, row);
+            let v = eval_expr(expr, columns, column_sources, row);
             eval_unary(op, &v)
         }
         Expression::Between {
@@ -1276,9 +1432,9 @@ fn eval_expr(expr: &Expression, columns: &[String], row: &[Value]) -> Value {
             low,
             high,
         } => {
-            let v = eval_expr(expr, columns, row);
-            let lo = eval_expr(low, columns, row);
-            let hi = eval_expr(high, columns, row);
+            let v = eval_expr(expr, columns, column_sources, row);
+            let lo = eval_expr(low, columns, column_sources, row);
+            let hi = eval_expr(high, columns, column_sources, row);
             Value::Bool(cmp_values(&v, &lo) != std::cmp::Ordering::Less
                 && cmp_values(&v, &hi) != std::cmp::Ordering::Greater)
         }
@@ -1289,23 +1445,23 @@ fn eval_expr(expr: &Expression, columns: &[String], row: &[Value]) -> Value {
         } => {
             for (when, then) in whens {
                 let match_val = if let Some(cv) = case_val {
-                    let cv_val = eval_expr(cv, columns, row);
-                    let when_val = eval_expr(when, columns, row);
+                    let cv_val = eval_expr(cv, columns, column_sources, row);
+                    let when_val = eval_expr(when, columns, column_sources, row);
                     cv_val == when_val
                 } else {
-                    eval_expr_bool(when, columns, row)
+                    eval_expr_bool(when, columns, column_sources, row)
                 };
                 if match_val {
-                    return eval_expr(then, columns, row);
+                    return eval_expr(then, columns, column_sources, row);
                 }
             }
             else_expr
                 .as_ref()
-                .map(|e| eval_expr(e, columns, row))
+                .map(|e| eval_expr(e, columns, column_sources, row))
                 .unwrap_or(Value::Null)
         }
         Expression::Cast { expr, target } => {
-            let v = eval_expr(expr, columns, row);
+            let v = eval_expr(expr, columns, column_sources, row);
             cast_value(&v, target)
         }
         Expression::Array(_) => Value::String("[...]".into()),
@@ -1455,10 +1611,17 @@ fn cmp_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
-fn merge_col_names(left: &[String], right: &[String]) -> Vec<String> {
-    let mut cols = left.to_vec();
-    cols.extend(right.iter().cloned());
-    cols
+fn merge_columns(
+    left_cols: &[String],
+    left_sources: &[Option<String>],
+    right_cols: &[String],
+    right_sources: &[Option<String>],
+) -> (Vec<String>, Vec<Option<String>>) {
+    let mut cols = left_cols.to_vec();
+    let mut sources = left_sources.to_vec();
+    cols.extend(right_cols.iter().cloned());
+    sources.extend(right_sources.iter().cloned());
+    (cols, sources)
 }
 
 fn merge_vals(left: &[Value], right: &[Value]) -> Vec<Value> {
@@ -1556,8 +1719,11 @@ mod tests {
     use crate::adapters::Value;
 
     fn mk_result(columns: Vec<&str>, rows: Vec<Vec<Value>>) -> QueryResult {
+        let cols: Vec<String> = columns.into_iter().map(String::from).collect();
+        let num_cols = cols.len();
         QueryResult {
-            columns: columns.into_iter().map(String::from).collect(),
+            columns: cols,
+            column_sources: vec![None; num_cols],
             rows,
             elapsed: std::time::Duration::default(),
             rows_affected: 0,
@@ -1580,8 +1746,10 @@ mod tests {
             }),
         };
         let left_cols = ["id".to_string(), "name".to_string()];
+        let left_srcs: Vec<Option<String>> = vec![None; left_cols.len()];
         let right_cols = ["user_id".to_string(), "amount".to_string()];
-        let res = resolve_equi_columns(&cond, &left_cols, &right_cols);
+        let right_srcs: Vec<Option<String>> = vec![None; right_cols.len()];
+        let res = resolve_equi_columns(&cond, &left_cols, &left_srcs, &right_cols, &right_srcs);
         assert_eq!(res, Some((0, 0)));
     }
 
@@ -1594,7 +1762,7 @@ mod tests {
         };
         let left_cols = ["a_id".to_string()];
         let right_cols = ["b_id".to_string()];
-        let res = resolve_equi_columns(&cond, &left_cols, &right_cols);
+        let res = resolve_equi_columns(&cond, &left_cols, &[], &right_cols, &[]);
         assert_eq!(res, Some((0, 0)));
     }
 
@@ -1605,7 +1773,7 @@ mod tests {
             left: Box::new(Expression::Ident("a".into())),
             right: Box::new(Expression::Ident("b".into())),
         };
-        let res = resolve_equi_columns(&cond, &[], &[]);
+        let res = resolve_equi_columns(&cond, &[], &[], &[], &[]);
         assert_eq!(res, None);
     }
 
@@ -1921,7 +2089,7 @@ mod tests {
         let cols = ["a", "b"];
         let row = [Value::Int(42), Value::String("hello".into())];
         let expr = Expression::Ident("b".into());
-        let result = eval_expr(&expr, &cols.map(String::from), &row);
+        let result = eval_expr(&expr, &cols.map(String::from), &[], &row);
         assert_eq!(result, Value::String("hello".into()));
     }
 
@@ -1934,9 +2102,9 @@ mod tests {
             left: Box::new(Expression::Ident("x".into())),
             right: Box::new(Expression::Integer(10)),
         };
-        assert!(eval_expr_bool(&expr, &cols.map(String::from), &row));
+        assert!(eval_expr_bool(&expr, &cols.map(String::from), &[], &row));
         let row2 = [Value::Int(5)];
-        assert!(!eval_expr_bool(&expr, &cols.map(String::from), &row2));
+        assert!(!eval_expr_bool(&expr, &cols.map(String::from), &[], &row2));
     }
 
     #[test]
@@ -1948,7 +2116,80 @@ mod tests {
             left: Box::new(Expression::Ident("x".into())),
             right: Box::new(Expression::Integer(10)),
         };
-        assert!(!eval_expr_bool(&expr, &cols.map(String::from), &row));
+        assert!(!eval_expr_bool(&expr, &cols.map(String::from), &[], &row));
+    }
+
+    // ── Qualified column resolution ─────────────────────────────────────
+
+    #[test]
+    fn eval_qualified_ident() {
+        let cols = ["id", "name", "id", "total"];
+        let sources: Vec<Option<String>> = vec![
+            Some("u".to_string()),
+            Some("u".to_string()),
+            Some("o".to_string()),
+            Some("o".to_string()),
+        ];
+        let row = [Value::Int(1), Value::String("Alice".into()), Value::Int(1429), Value::Float(119.47)];
+        let expr = Expression::QualifiedIdent {
+            table: "o".into(),
+            field: "id".into(),
+        };
+        let result = eval_expr(&expr, &cols.map(String::from), &sources, &row);
+        assert_eq!(result, Value::Int(1429));
+    }
+
+    #[test]
+    fn eval_qualified_ident_fallback() {
+        let cols = ["id", "name"];
+        let sources: Vec<Option<String>> = vec![None, None];
+        let row = [Value::Int(1), Value::String("Alice".into())];
+        let expr = Expression::QualifiedIdent {
+            table: "o".into(),
+            field: "id".into(),
+        };
+        let result = eval_expr(&expr, &cols.map(String::from), &sources, &row);
+        assert_eq!(result, Value::Int(1));
+    }
+
+    #[test]
+    fn find_col_idx_qualified() {
+        let left_cols = ["id", "name"];
+        let left_srcs: Vec<Option<String>> = vec![Some("u".into()), Some("u".into())];
+        let right_cols = ["id", "total"];
+        let right_srcs: Vec<Option<String>> = vec![Some("o".into()), Some("o".into())];
+
+        let expr = Expression::QualifiedIdent {
+            table: "o".into(),
+            field: "id".into(),
+        };
+        let res = find_col_idx(&expr, &left_cols.map(String::from), &left_srcs, &right_cols.map(String::from), &right_srcs);
+        assert_eq!(res, Some((0, true)));
+    }
+
+    #[test]
+    fn resolve_equi_with_duplicate_names() {
+        let cond = Expression::BinaryOp {
+            op: BinaryOp::Eq,
+            left: Box::new(Expression::QualifiedIdent {
+                table: "o".into(),
+                field: "id".into(),
+            }),
+            right: Box::new(Expression::Ident("order_id".into())),
+        };
+        let left_cols = ["id", "name", "id", "total"];
+        let left_srcs: Vec<Option<String>> = vec![
+            Some("u".into()), Some("u".into()),
+            Some("o".into()), Some("o".into()),
+        ];
+        let right_cols = ["order_id"];
+        let right_srcs: Vec<Option<String>> = vec![None];
+        let res = resolve_equi_columns(
+            &cond,
+            &left_cols.map(String::from), &left_srcs,
+            &right_cols.map(String::from), &right_srcs,
+        );
+        assert_eq!(res, Some((2, 0)));
     }
 
     // ── cmp_values ─────────────────────────────────────────────────────
@@ -2229,6 +2470,7 @@ mod tests {
                         "total".into(),
                         "status".into(),
                     ],
+                    column_sources: vec![None; 4],
                     rows: vec![
                         vec![Value::Int(1), Value::Int(1), Value::Int(500), Value::String("paid".into())],
                         vec![Value::Int(2), Value::Int(1), Value::Int(600), Value::String("paid".into())],
@@ -2242,6 +2484,7 @@ mod tests {
             } else if query.contains("users") {
                 Ok(QueryResult {
                     columns: vec!["id".into(), "name".into()],
+                    column_sources: vec![None; 2],
                     rows: vec![
                         vec![Value::Int(1), Value::String("Alice".into())],
                         vec![Value::Int(2), Value::String("Bob".into())],
@@ -2253,6 +2496,7 @@ mod tests {
             } else {
                 Ok(QueryResult {
                     columns: vec![],
+                    column_sources: vec![],
                     rows: vec![],
                     elapsed: std::time::Duration::default(),
                     rows_affected: 0,
