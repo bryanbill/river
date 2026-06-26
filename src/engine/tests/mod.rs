@@ -1,8 +1,8 @@
 use super::planner::{plan_statement, translate_insert_mongo, PlanNode};
 use super::translator::{
-    MSSQLDialect, MySQLDialect, PostgresDialect, SqlDialect, translate_alter_table,
-    translate_data_type, translate_expr, translate_query, translate_query_mongo,
-    translate_statement_sql,
+    MSSQLDialect, MySQLDialect, PostgresDialect, SQLiteDialect, SqlDialect,
+    translate_alter_table, translate_data_type, translate_drop_table, translate_expr,
+    translate_query, translate_query_mongo, translate_statement_sql,
 };
 use crate::connection::DatabaseKind;
 use crate::lang::ast::*;
@@ -1289,4 +1289,110 @@ fn plan_alter_table_mongodb_empty() {
         }
         other => panic!("Expected AlterTable plan node, got: {:?}", other),
     }
+}
+
+// ── DROP TABLE translator tests ───────────────────────────────────────────────
+
+#[test]
+fn translate_drop_table_postgres() {
+    let dt = DropTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        if_exists: false,
+        cascade: false,
+    };
+    let sql = translate_drop_table(&dt, &PostgresDialect);
+    assert_eq!(sql, r#"DROP TABLE "users""#);
+}
+
+#[test]
+fn translate_drop_table_if_exists_postgres() {
+    let dt = DropTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        if_exists: true,
+        cascade: false,
+    };
+    let sql = translate_drop_table(&dt, &PostgresDialect);
+    assert_eq!(sql, r#"DROP TABLE IF EXISTS "users""#);
+}
+
+#[test]
+fn translate_drop_table_cascade_postgres() {
+    let dt = DropTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        if_exists: false,
+        cascade: true,
+    };
+    let sql = translate_drop_table(&dt, &PostgresDialect);
+    assert_eq!(sql, r#"DROP TABLE "users" CASCADE"#);
+}
+
+#[test]
+fn translate_drop_table_cascade_mysql() {
+    let dt = DropTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        if_exists: false,
+        cascade: true,
+    };
+    let sql = translate_drop_table(&dt, &MySQLDialect);
+    assert_eq!(sql, "DROP TABLE `users` CASCADE");
+}
+
+#[test]
+fn translate_drop_table_mssql_no_cascade() {
+    let dt = DropTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        if_exists: false,
+        cascade: true,
+    };
+    let sql = translate_drop_table(&dt, &MSSQLDialect);
+    assert_eq!(sql, "DROP TABLE [users]");
+}
+
+#[test]
+fn translate_drop_table_sqlite_no_cascade() {
+    let dt = DropTable {
+        table: "users".into(),
+        connection: None,
+        schema: None,
+        if_exists: false,
+        cascade: true,
+    };
+    let sql = translate_drop_table(&dt, &SQLiteDialect);
+    assert_eq!(sql, r#"DROP TABLE "users""#);
+}
+
+#[test]
+fn translate_drop_table_with_schema() {
+    let dt = DropTable {
+        table: "users".into(),
+        connection: None,
+        schema: Some("public".into()),
+        if_exists: false,
+        cascade: false,
+    };
+    let sql = translate_drop_table(&dt, &PostgresDialect);
+    assert_eq!(sql, r#"DROP TABLE "public"."users""#);
+}
+
+#[test]
+fn translate_drop_table_if_exists_cascade() {
+    let dt = DropTable {
+        table: "logs".into(),
+        connection: None,
+        schema: None,
+        if_exists: true,
+        cascade: true,
+    };
+    let sql = translate_drop_table(&dt, &PostgresDialect);
+    assert_eq!(sql, r#"DROP TABLE IF EXISTS "logs" CASCADE"#);
 }

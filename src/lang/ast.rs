@@ -14,6 +14,7 @@ pub enum Statement {
     CreateTable(CreateTable),
     CreateTableAs(CreateTableAs),
     AlterTable(AlterTable),
+    DropTable(DropTable),
     ParamAssign {
         name: String,
         value: Expression,
@@ -432,6 +433,15 @@ pub struct CreateTable {
     pub schema: Option<String>,
     pub columns: Vec<ColumnDef>,
     pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropTable {
+    pub table: String,
+    pub connection: Option<String>,
+    pub schema: Option<String>,
+    pub if_exists: bool,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1078,3 +1078,152 @@ fn parse_alter_with_schema_and_connection() {
         other => panic!("Expected AlterTable, got {:?}", other),
     }
 }
+
+// ── DROP TABLE lexer tests ────────────────────────────────────────────────────
+
+#[test]
+fn lex_drop_table_keywords() {
+    let tokens = lexer::lex("cascade restrict");
+    let kinds: Vec<_> = tokens.iter().map(|s| &s.token).collect();
+    assert!(kinds.contains(&&Token::Cascade));
+    assert!(kinds.contains(&&Token::Restrict));
+}
+
+#[test]
+fn lex_cascade_restrict_as_idents() {
+    let tokens = lex_tokens("cascade restrict");
+    assert!(!tokens.is_empty());
+    let kinds: Vec<&Token> = tokens.iter().map(|(t, _)| t).collect();
+    assert!(kinds.contains(&&Token::Cascade));
+    assert!(kinds.contains(&&Token::Restrict));
+}
+
+// ── DROP TABLE parser tests ───────────────────────────────────────────────────
+
+#[test]
+fn parse_drop_table_simple() {
+    let result = parse_one("drop table users");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropTable(dt) => {
+            assert_eq!(dt.table, "users");
+            assert!(!dt.if_exists);
+            assert!(!dt.cascade);
+            assert!(dt.schema.is_none());
+            assert!(dt.connection.is_none());
+        }
+        other => panic!("Expected DropTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_drop_table_if_exists() {
+    let result = parse_one("drop table if exists users");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropTable(dt) => {
+            assert_eq!(dt.table, "users");
+            assert!(dt.if_exists);
+            assert!(!dt.cascade);
+        }
+        other => panic!("Expected DropTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_drop_table_cascade() {
+    let result = parse_one("drop table users cascade");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropTable(dt) => {
+            assert_eq!(dt.table, "users");
+            assert!(!dt.if_exists);
+            assert!(dt.cascade);
+        }
+        other => panic!("Expected DropTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_drop_table_restrict() {
+    let result = parse_one("drop table users restrict");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropTable(dt) => {
+            assert_eq!(dt.table, "users");
+            assert!(!dt.if_exists);
+            assert!(!dt.cascade);
+        }
+        other => panic!("Expected DropTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_drop_table_if_exists_cascade() {
+    let result = parse_one("drop table if exists users cascade");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropTable(dt) => {
+            assert_eq!(dt.table, "users");
+            assert!(dt.if_exists);
+            assert!(dt.cascade);
+        }
+        other => panic!("Expected DropTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_drop_table_with_schema() {
+    let result = parse_one("drop table public.users");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropTable(dt) => {
+            assert_eq!(dt.schema.as_deref(), Some("public"));
+            assert_eq!(dt.table, "users");
+        }
+        other => panic!("Expected DropTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_drop_table_with_connection() {
+    let result = parse_one("drop table users@pg");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropTable(dt) => {
+            assert_eq!(dt.connection.as_deref(), Some("pg"));
+            assert_eq!(dt.table, "users");
+        }
+        other => panic!("Expected DropTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_drop_table_with_schema_and_connection() {
+    let result = parse_one("drop table public.users@pg");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropTable(dt) => {
+            assert_eq!(dt.schema.as_deref(), Some("public"));
+            assert_eq!(dt.connection.as_deref(), Some("pg"));
+            assert_eq!(dt.table, "users");
+        }
+        other => panic!("Expected DropTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_drop_table_full() {
+    let result = parse_one("drop table if exists public.users@pg cascade");
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    match &result.unwrap()[0] {
+        Statement::DropTable(dt) => {
+            assert_eq!(dt.table, "users");
+            assert!(dt.if_exists);
+            assert!(dt.cascade);
+            assert_eq!(dt.schema.as_deref(), Some("public"));
+            assert_eq!(dt.connection.as_deref(), Some("pg"));
+        }
+        other => panic!("Expected DropTable, got {:?}", other),
+    }
+}

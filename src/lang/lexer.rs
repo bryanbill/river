@@ -86,6 +86,8 @@ pub enum Token {
     Rename,
     To,
     Type,
+    Cascade,
+    Restrict,
 
     // Aggregate function names (treated as keywords)
     Count,
@@ -271,6 +273,8 @@ impl fmt::Display for Token {
             Token::Rename => write!(f, "rename"),
             Token::To => write!(f, "to"),
             Token::Type => write!(f, "type"),
+            Token::Cascade => write!(f, "cascade"),
+            Token::Restrict => write!(f, "restrict"),
             Token::Count => write!(f, "count"),
             Token::Sum => write!(f, "sum"),
             Token::Avg => write!(f, "avg"),
@@ -581,6 +585,8 @@ impl<'a> Lexer<'a> {
             "rename" => Spanned::new(Token::Rename, start..end),
             "to" => Spanned::new(Token::To, start..end),
             "type" => Spanned::new(Token::Type, start..end),
+            "cascade" => Spanned::new(Token::Cascade, start..end),
+            "restrict" => Spanned::new(Token::Restrict, start..end),
             _ => Spanned::new(Token::Ident(ident), start..end),
         }
     }

@@ -7,9 +7,9 @@
   uri: "mysql://river:river@localhost:3307/river"
   schema: river
 
-- name: mssql
-  kind: mssql
-  uri: "server=tcp:localhost,1433;database=master;trustservercertificate=true;user id=sa;password=RiverPass123!"
+# - name: mssql
+#   kind: mssql
+#   uri: "server=tcp:localhost,1433;database=master;trustservercertificate=true;user id=sa;password=RiverPass123!"
 
 - name: mongo
   kind: mongodb
