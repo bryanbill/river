@@ -19,8 +19,6 @@ pub struct Theme {
     pub input_prefix: Color,
     pub input_text: Color,
     pub input_cursor: Color,
-    pub status_bar_bg: Color,
-    pub status_bar_fg: Color,
     pub separator: Color,
     pub syntax_keyword: Color,
     pub syntax_function: Color,
@@ -32,6 +30,8 @@ pub struct Theme {
     pub syntax_punctuation: Color,
     pub syntax_bool: Color,
     pub syntax_null: Color,
+    pub scrollbar_track: Color,
+    pub scrollbar_thumb: Color,
 }
 
 impl Theme {
@@ -55,8 +55,6 @@ impl Theme {
             input_prefix: Color::Rgb(152, 195, 121),
             input_text: Color::Rgb(171, 178, 191),
             input_cursor: Color::Rgb(97, 175, 239),
-            status_bar_bg: Color::Rgb(40, 44, 52),
-            status_bar_fg: Color::Rgb(92, 99, 112),
             separator: Color::Rgb(92, 99, 112),
             syntax_keyword: Color::Rgb(198, 120, 221),
             syntax_function: Color::Rgb(86, 182, 194),
@@ -68,6 +66,8 @@ impl Theme {
             syntax_punctuation: Color::Rgb(92, 99, 112),
             syntax_bool: Color::Rgb(86, 182, 194),
             syntax_null: Color::Rgb(92, 99, 112),
+            scrollbar_track: Color::Rgb(60, 63, 71),
+            scrollbar_thumb: Color::Rgb(92, 99, 112),
         }
     }
 
@@ -101,10 +101,6 @@ impl Theme {
     pub fn input_cursor_overlay(&self, base: Style) -> Style {
         base.bg(self.input_cursor)
             .add_modifier(Modifier::BOLD)
-    }
-
-    pub fn status_bar_style(&self) -> Style {
-        Style::default().fg(self.status_bar_fg).bg(self.status_bar_bg)
     }
 
     pub fn table_header_style(&self) -> Style {
