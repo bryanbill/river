@@ -1,8 +1,10 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
 
@@ -11,36 +13,36 @@ use crate::tui::highlight;
 use crate::tui::output::OutputLine;
 use crate::tui::theme::Theme;
 
-pub fn render(frame: &mut Frame, app: &App) {
-    let theme = &app.theme;
-    let area = frame.area();
-
-    let main_layout = Layout::default()
+pub fn compute_layout_rects(area: Rect, app: &App) -> Vec<Rect> {
+    let loader_height: u16 = if matches!(app.status, Status::Running) { 1 } else { 0 };
+    Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(input_height(app, area)),
-            Constraint::Length(1),
+            Constraint::Length(input_height(app, area, loader_height)),
         ])
-        .split(area);
+        .split(area)
+        .to_vec()
+}
+
+pub fn render(frame: &mut Frame, app: &App) {
+    let theme = &app.theme;
+    let area = frame.area();
+
+    let main_layout = compute_layout_rects(area, app);
 
     render_header(frame, main_layout[0], app, theme);
     render_output(frame, main_layout[1], app, theme);
     render_input(frame, main_layout[2], app, theme);
-    render_status_bar(frame, main_layout[3], app, theme);
-
-    if app.show_help {
-        render_help_overlay(frame, area, theme);
-    }
 }
 
-fn input_height(app: &App, area: Rect) -> u16 {
+fn input_height(app: &App, area: Rect, loader_height: u16) -> u16 {
     let lines = app.input.line_count() as u16;
-    let needed = lines.saturating_add(1);
-    let reserved = 10u16;
-    let max = area.height.saturating_sub(reserved).max(4);
-    let min = 3u16;
+    let needed = lines.saturating_add(1).saturating_add(loader_height);
+    let reserved = 6u16;
+    let max = area.height.saturating_sub(reserved).max(6);
+    let min = 6u16.saturating_add(loader_height);
     needed.clamp(min, max)
 }
 
@@ -88,32 +90,42 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 fn render_output(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let visible_height = area.height as usize;
+    let [content_area, scrollbar_area] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ]).areas(area);
+
+    let visible_height = content_area.height as usize;
     let (offset, visible_lines) = app.output.visible_range(visible_height);
 
-    let scroll_hint = if offset > 0 {
-        format!(
-            " [↑ {} more lines — PgUp to scroll] ",
-            offset
-        )
-    } else {
-        String::new()
-    };
+    let total_content = app.output.total_visual_lines();
+    let mut scrollbar_state = ScrollbarState::new(total_content)
+        .viewport_content_length(visible_height)
+        .position(offset);
 
     let lines: Vec<Line> = visible_lines
         .iter()
-        .flat_map(|line| render_output_line(line, area.width, visible_height, theme))
+        .flat_map(|line| render_output_line(line, content_area.width, visible_height, theme))
         .collect();
 
     frame.render_widget(
         Paragraph::new(Text::from(lines))
             .block(
                 Block::default()
-                    .borders(Borders::NONE)
-                    .title_top(scroll_hint.dim()),
+                    .borders(Borders::NONE),
             ),
-        area,
+        content_area,
     );
+
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .track_symbol(Some("│"))
+        .thumb_symbol("█")
+        .track_style(Style::default().fg(theme.scrollbar_track))
+        .thumb_style(Style::default().fg(theme.scrollbar_thumb));
+
+    frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
 }
 
 fn render_output_line<'a>(line: &'a OutputLine, max_width: u16, available_height: usize, theme: &'a Theme) -> Vec<Line<'a>> {
@@ -143,8 +155,8 @@ fn render_output_line<'a>(line: &'a OutputLine, max_width: u16, available_height
         OutputLine::Json(json) => {
             vec![Line::from(highlight_json(json, theme))]
         }
-        OutputLine::Table { headers, rows, row_offset } => {
-            render_compact_table(headers, rows, *row_offset, max_width, available_height, theme)
+        OutputLine::Table { headers, rows, row_offset, col_offset } => {
+            render_compact_table(headers, rows, *row_offset, *col_offset, max_width, available_height, theme)
         }
     }
 }
@@ -153,6 +165,7 @@ fn render_compact_table<'a>(
     headers: &[String],
     rows: &[Vec<String>],
     row_offset: usize,
+    col_offset: usize,
     max_width: u16,
     available_height: usize,
     theme: &'a Theme,
@@ -160,12 +173,7 @@ fn render_compact_table<'a>(
     let mut lines: Vec<Line<'a>> = Vec::new();
 
     let col_count = headers.len();
-    if col_count == 0 {
-        lines.push(Line::from("(empty table)"));
-        return lines;
-    }
-
-    if rows.is_empty() {
+    if col_count == 0 || rows.is_empty() {
         lines.push(Line::from("(empty table)"));
         return lines;
     }
@@ -196,17 +204,41 @@ fn render_compact_table<'a>(
         *w = (*w).min(max_col).max(3);
     }
 
-    let total: usize = col_widths.iter().sum();
-    let available = max_width.saturating_sub(3) as usize;
-    let effective = total.min(available);
-    let bar_width = effective + col_widths.len().saturating_mul(3).saturating_sub(1);
+    let cell_padding: usize = 3;
+    let total_content_width: usize = col_widths.iter().sum::<usize>() + (col_widths.len().saturating_sub(1)) * cell_padding + 2;
+    let viewport_width = max_width.saturating_sub(1) as usize;
+
+    let (visible_cols_start, visible_cols_end) = if total_content_width <= viewport_width {
+        (0_usize, col_count)
+    } else {
+        let first_visible = col_offset.min(col_count.saturating_sub(1));
+
+        let mut last_visible = first_visible;
+        let mut w_accum = 1usize;
+        for i in first_visible..col_count {
+            let col_total = col_widths[i] + cell_padding;
+            if w_accum + col_total > viewport_width && i > first_visible {
+                break;
+            }
+            w_accum += col_total;
+            last_visible = i + 1;
+        }
+        (first_visible, last_visible.min(col_count))
+    };
+
+    let visible_headers: Vec<&str> = headers[visible_cols_start..visible_cols_end].iter().map(|s| s.as_str()).collect();
+    let visible_widths: Vec<usize> = col_widths[visible_cols_start..visible_cols_end].to_vec();
+
+    let effective: usize = visible_widths.iter().sum();
+    let bar_width = effective + visible_widths.len().saturating_mul(cell_padding).saturating_sub(1);
+    let bar_width_clamped = bar_width.min(viewport_width).max(3);
 
     let h_style = theme.table_header_style();
     let border_fg = theme.table_border;
 
     let bar = |c1: char, c2: char| -> Line<'a> {
         Line::from(Span::styled(
-            format!("{}{}{}", c1, "─".repeat(bar_width), c2),
+            format!("{}{}{}", c1, "─".repeat(bar_width_clamped), c2),
             Style::default().fg(border_fg),
         ))
     };
@@ -221,11 +253,11 @@ fn render_compact_table<'a>(
     lines.push(bar('┌', '┐'));
 
     let mut header_spans: Vec<Span> = vec![Span::styled("│ ", Style::default().fg(border_fg))];
-    for (i, h) in headers.iter().enumerate() {
-        let w = col_widths[i];
+    for (i, h) in visible_headers.iter().enumerate() {
+        let w = visible_widths[i];
         let padded = format!("{:w$}", h, w = w);
         header_spans.push(Span::styled(padded, h_style));
-        if i < headers.len() - 1 {
+        if i < visible_headers.len() - 1 {
             header_spans.push(Span::styled(" │ ", Style::default().fg(border_fg)));
         }
     }
@@ -244,11 +276,11 @@ fn render_compact_table<'a>(
         };
 
         let mut row_spans: Vec<Span> = vec![Span::styled("│ ", Style::default().fg(border_fg))];
-        for (i, cell) in row.iter().enumerate() {
-            let w = col_widths[i];
+        for (i, cell) in row[visible_cols_start..visible_cols_end].iter().enumerate() {
+            let w = visible_widths[i];
             let padded = format!("{:w$}", cell, w = w);
             row_spans.push(Span::styled(padded, row_style));
-            if i < row.len() - 1 {
+            if i < row[visible_cols_start..visible_cols_end].len() - 1 {
                 row_spans.push(Span::styled(" │ ", Style::default().fg(border_fg)));
             }
         }
@@ -257,6 +289,14 @@ fn render_compact_table<'a>(
     }
 
     lines.push(bar('└', '┘'));
+
+    if total_content_width > viewport_width {
+        let max_col_offset = col_count.saturating_sub(1);
+        lines.push(Line::from(Span::styled(
+            format!("  ← col {}/{} — Shift+← → or Shift+wheel to scroll →", col_offset + 1, max_col_offset + 1),
+            theme.output_info_style(),
+        )));
+    }
 
     if has_more_below {
         let remaining = total_rows - end;
@@ -386,63 +426,103 @@ fn looks_like_null(chars: &[char], i: usize) -> bool {
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let all_lines = app.input.lines();
-    let cursor_line = app.input.cursor_line();
-    let cursor_col = app.input.cursor_col();
+    let is_running = matches!(app.status, Status::Running);
+    let loader_height: usize = if is_running { 1 } else { 0 };
+    let border_height = 1usize;
+    let area_height = (area.height as usize).saturating_sub(border_height + loader_height);
 
     let tokens = highlight::tokenize(&app.input.text);
 
-    let border_height = 1u16;
-    let area_height = (area.height as usize).saturating_sub(border_height as usize);
+    let text_width = (area.width as usize).saturating_sub(3).max(10);
+    let logical_lines = app.input.lines();
+    let cursor_logical_line = app.input.cursor_line();
+    let cursor_logical_col = app.input.cursor_col();
 
-    let total_lines = all_lines.len();
+    struct Chunk {
+        text: String,
+        byte_start: usize,
+    }
 
-    let (view_offset, content_height) = if total_lines <= area_height {
-        (0, total_lines)
+    let mut chunks: Vec<Chunk> = Vec::new();
+    let mut display_lines: Vec<(usize, usize)> = Vec::new();
+    let mut cursor_display_line: Option<usize> = None;
+    let mut cursor_display_col: usize = 0;
+
+    for (li, line_text) in logical_lines.iter().enumerate() {
+        let line_start = highlight::line_start_byte(&app.input.text, li);
+        let chars: Vec<char> = line_text.chars().collect();
+        let mut start = 0;
+        while start < chars.len() || (start == 0 && chars.is_empty()) {
+            let end = (start + text_width).min(chars.len());
+            let chunk_text: String = chars[start..end].iter().collect();
+            let byte_offset: usize = line_text
+                .chars()
+                .take(start)
+                .map(|c| c.len_utf8())
+                .sum();
+            chunks.push(Chunk { text: chunk_text, byte_start: line_start + byte_offset });
+            display_lines.push((li, chunks.len() - 1));
+
+            if li == cursor_logical_line {
+                let col_in_chars = cursor_logical_col;
+                if col_in_chars >= start && (col_in_chars < end || end == chars.len()) {
+                    cursor_display_line = Some(display_lines.len() - 1);
+                    cursor_display_col = col_in_chars - start;
+                }
+            }
+
+            if end >= chars.len() {
+                break;
+            }
+            start = end;
+        }
+    }
+
+    let total_display = display_lines.len();
+    let cursor_dl = cursor_display_line.unwrap_or(0);
+
+    let (view_offset, content_height) = if total_display <= area_height {
+        (0, total_display)
     } else {
         let ch = area_height.saturating_sub(2).max(1);
-        let off = if cursor_line < ch / 2 {
+        let off = if cursor_dl < ch / 2 {
             0
-        } else if cursor_line >= total_lines.saturating_sub(ch / 2) {
-            total_lines.saturating_sub(ch)
+        } else if cursor_dl >= total_display.saturating_sub(ch / 2) {
+            total_display.saturating_sub(ch)
         } else {
-            cursor_line.saturating_sub(ch / 2)
+            cursor_dl.saturating_sub(ch / 2)
         };
         (off, ch)
     };
 
-    let view_end = (view_offset + content_height).min(total_lines);
-
-    let has_more_above = view_offset > 0;
-    let has_more_below = view_end < total_lines;
-
+    let view_end = (view_offset + content_height).min(total_display);
     let mut rendered_lines: Vec<Line> = Vec::with_capacity(area_height);
 
-    if has_more_above {
+    if view_offset > 0 {
         rendered_lines.push(Line::from(Span::styled(
             format!("  ↑ {} more line(s) above", view_offset),
             Style::default().fg(theme.output_dim),
         )));
     }
 
-    for (line_idx, line_text) in all_lines.iter().enumerate().skip(view_offset).take(view_end - view_offset) {
-        let line_start = highlight::line_start_byte(&app.input.text, line_idx);
+    for di in view_offset..view_end {
+        let (_logical_idx, chunk_idx) = display_lines[di];
+        let chunk = &chunks[chunk_idx];
 
-        let is_cursor_line = line_idx == cursor_line;
+        let is_cursor_line = Some(di) == cursor_display_line;
         let cursor_byte = if is_cursor_line {
-            Some(
-                line_text
-                    .chars()
-                    .take(cursor_col)
-                    .map(|c| c.len_utf8())
-                    .sum(),
-            )
+            let byte_pos: usize = chunk
+                .text
+                .chars()
+                .take(cursor_display_col)
+                .map(|c| c.len_utf8())
+                .sum();
+            Some(byte_pos)
         } else {
             None
         };
 
-        let spans =
-            highlight::highlight_line(line_text, line_start, &tokens, cursor_byte, theme);
+        let spans = highlight::highlight_line(&chunk.text, chunk.byte_start, &tokens, cursor_byte, theme);
 
         let prefix = if is_cursor_line {
             Span::styled("> ", theme.input_prefix_style())
@@ -455,8 +535,8 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         rendered_lines.push(Line::from(line_spans));
     }
 
-    if has_more_below {
-        let remaining = total_lines - view_end;
+    if view_end < total_display {
+        let remaining = total_display - view_end;
         rendered_lines.push(Line::from(Span::styled(
             format!("  ↓ {} more line(s) below", remaining),
             Style::default().fg(theme.output_dim),
@@ -469,6 +549,16 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         rendered_lines.push(Line::from(vec![prefix, cursor]));
     }
 
+    if is_running {
+        let spinner = spinner_char();
+        rendered_lines.push(Line::from(Span::styled(
+            format!("  {} Running...", spinner),
+            Style::default()
+                .fg(theme.output_json_number)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(theme.separator_style());
@@ -479,129 +569,11 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     );
 }
 
-fn render_status_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let db_count = app.adapters.len();
-
-    let mut spans: Vec<Span> = vec![
-        Span::styled("Enter: submit", theme.status_bar_style()),
-        Span::styled(" | ", theme.status_bar_style()),
-        Span::styled("S-Enter/Alt-Enter: newline", theme.status_bar_style()),
-        Span::styled(" | ", theme.status_bar_style()),
-        Span::styled("↑↓: move cursor", theme.status_bar_style()),
-        Span::styled(" | ", theme.status_bar_style()),
-        Span::styled("C-↑↓: history", theme.status_bar_style()),
-        Span::styled(" | ", theme.status_bar_style()),
-        Span::styled("S-↑↓: scroll table", theme.status_bar_style()),
-        Span::styled(" | ", theme.status_bar_style()),
-        Span::styled("PgUp/Dn: page", theme.status_bar_style()),
-        Span::styled(" | ", theme.status_bar_style()),
-        Span::styled("Ctrl+P/N: input hist", theme.status_bar_style()),
-        Span::styled(" | ", theme.status_bar_style()),
-        Span::styled("Ctrl+D: quit", theme.status_bar_style()),
-        Span::styled(" | ", theme.status_bar_style()),
-        Span::styled("?: help", theme.status_bar_style()),
-        Span::styled(" | ", theme.status_bar_style()),
-        Span::styled(format!("{} db(s)", db_count), theme.status_bar_style()),
-    ];
-
-    if let Status::Error(msg) = &app.status {
-        spans.push(Span::styled(
-            format!(" ✗ {}", msg),
-            Style::default()
-                .fg(Color::White)
-                .bg(theme.output_error),
-        ));
-    }
-
-    if matches!(app.status, Status::Running) {
-        spans.push(Span::styled(
-            " Running... ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-
-    let bar = Line::from(spans);
-
-    frame.render_widget(
-        Paragraph::new(bar).block(Block::default().style(theme.status_bar_style())),
-        area,
-    );
-}
-
-fn render_help_overlay(frame: &mut Frame, area: Rect, theme: &Theme) {
-    let overlay_width = 54u16;
-    let overlay_height = 26u16;
-
-    let x = area.width.saturating_sub(overlay_width) / 2;
-    let y = area.height.saturating_sub(overlay_height) / 2;
-
-    let overlay_area = Rect {
-        x: area.x + x,
-        y: area.y + y,
-        width: overlay_width.min(area.width),
-        height: overlay_height.min(area.height),
-    };
-
-    let help_text = vec![
-        Line::from(Span::styled(
-            " Keybindings ",
-            Style::default()
-                .fg(theme.header_fg)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from("  Enter          Submit query"),
-        Line::from("  Shift+Enter    Newline (kitty/wezterm)"),
-        Line::from("  Alt+Enter      Newline (reliable fallback)"),
-        Line::from("  Ctrl+J         Newline"),
-        Line::from("  Paste          Multi-line paste"),
-        Line::from("  Up/Down        Move cursor within input"),
-        Line::from("  Ctrl+Up/Down   Navigate query history"),
-        Line::from("  Shift+Up/Down  Scroll table rows"),
-        Line::from("  PgUp/PgDown    Scroll output page"),
-        Line::from("  Ctrl+P/N       Input history prev/next"),
-        Line::from("  Ctrl+W         Delete word before cursor"),
-        Line::from("  Ctrl+D         Quit"),
-        Line::from("  Ctrl+L         Clear output"),
-        Line::from("  Ctrl+C         Cancel running query"),
-        Line::from("  Left/Right     Move cursor in input"),
-        Line::from("  Home/End       Jump to line start/end"),
-        Line::from("  / or ?         Show this help"),
-        Line::from("  :help          Show this help"),
-        Line::from("  :quit          Quit"),
-        Line::from(""),
-        Line::from(Span::styled(
-            " Commands ",
-            Style::default()
-                .fg(theme.header_fg)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from("  find ...      Query data"),
-        Line::from("  show tables   List tables"),
-        Line::from("  describe <t>  Describe table"),
-        Line::from(""),
-        Line::from(Span::styled(
-            " Press any key to close ",
-            Style::default().fg(theme.output_dim),
-        )),
-    ];
-
-    frame.render_widget(Clear, overlay_area);
-    frame.render_widget(
-        Paragraph::new(Text::from(help_text))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.table_border))
-                    .style(
-                        Style::default()
-                            .bg(theme.table_header_bg)
-                            .fg(theme.output_text),
-                    ),
-            ),
-        overlay_area,
-    );
+fn spinner_char() -> char {
+    const CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    CHARS[(millis / 100) as usize % CHARS.len()]
 }

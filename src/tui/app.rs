@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::DefaultTerminal;
+use ratatui::layout::Rect;
 
 use crate::adapters::DatabaseAdapter;
 use crate::connection::DatabaseKind;
@@ -27,6 +28,14 @@ pub struct QuerySession {
     pub lines: Vec<OutputLine>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum DragTarget {
+    None,
+    OutputVertical,
+    TableHorizontal,
+}
+
 pub struct App {
     pub adapters: HashMap<String, Box<dyn DatabaseAdapter>>,
     pub source_db: Vec<(String, DatabaseKind)>,
@@ -36,10 +45,15 @@ pub struct App {
     pub quit: bool,
     pub theme: Theme,
     pub active_connection: Option<String>,
-    pub show_help: bool,
     pending_query: Option<String>,
     pub sessions: Vec<QuerySession>,
     pub session_idx: usize,
+    pub scrollbar_dragging: bool,
+    pub drag_target: DragTarget,
+    pub drag_origin_row: u16,
+    pub drag_start_offset: usize,
+    pub output_area: Rect,
+    pub input_area: Rect,
 }
 
 const MAX_HISTORY: usize = 1000;
@@ -59,7 +73,7 @@ impl App {
         let mut output = OutputBuffer::new(10_000);
 
         output.push(OutputLine::Info(
-            "River v0.7.0 — Unified Database Access".into(),
+            "River v0.8.0 — Unified Database Access".into(),
         ));
 
         let connected: Vec<&str> = adapters.keys().map(|s| s.as_str()).collect();
@@ -91,10 +105,15 @@ impl App {
             quit: false,
             theme: Theme::default(),
             active_connection,
-            show_help: false,
             pending_query: None,
             sessions,
             session_idx: 0,
+            scrollbar_dragging: false,
+            drag_target: DragTarget::None,
+            drag_origin_row: 0,
+            drag_start_offset: 0,
+            output_area: Rect::default(),
+            input_area: Rect::default(),
         }
     }
 
@@ -152,6 +171,12 @@ pub async fn run_event_loop(
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;
 
+        let size = terminal.size()?;
+        let area = Rect::new(0, 0, size.width, size.height);
+        let rects = ui::compute_layout_rects(area, app);
+        app.output_area = rects[1];
+        app.input_area = rects[2];
+
         if app.quit {
             break;
         }
@@ -169,19 +194,14 @@ pub async fn run_event_loop(
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Release => {}
             Event::Key(key) => {
-                if app.show_help {
-                    app.show_help = false;
-                    continue;
-                }
                 handle_key(app, key);
             }
             Event::Paste(text) => {
-                if app.show_help {
-                    app.show_help = false;
-                    continue;
-                }
                 app.maybe_exit_history_browse();
                 app.input.insert_text(&text);
+            }
+            Event::Mouse(mouse) => {
+                handle_mouse(app, mouse);
             }
             Event::Resize(_, _) => {}
             _ => {}
@@ -255,9 +275,6 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
             app.maybe_exit_history_browse();
             app.input.delete_word_before();
         }
-        KeyCode::Char('?') if !has_ctrl => {
-            app.show_help = true;
-        }
         KeyCode::Up => {
             if has_ctrl {
                 app.navigate_history(-1);
@@ -291,11 +308,15 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
         KeyCode::Left => {
             if key.modifiers.is_empty() {
                 app.input.move_cursor_left();
+            } else if has_shift {
+                app.output.scroll_last_table_horizontally(-1);
             }
         }
         KeyCode::Right => {
             if key.modifiers.is_empty() {
                 app.input.move_cursor_right();
+            } else if has_shift {
+                app.output.scroll_last_table_horizontally(1);
             }
         }
         KeyCode::Home => {
@@ -321,16 +342,100 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
     }
 }
 
+fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    let col = mouse.column;
+    let row = mouse.row;
+    let has_shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+
+    match mouse.kind {
+        MouseEventKind::ScrollDown => {
+            if is_in_area(col, row, app.output_area) {
+                if has_shift {
+                    app.output.scroll_last_table_horizontally(1);
+                } else {
+                    let before = app.output.last_table_row_offset();
+                    app.output.scroll_last_table_down(5);
+                    let after = app.output.last_table_row_offset();
+                    if before == after {
+                        app.output.scroll_down(3);
+                    }
+                }
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if is_in_area(col, row, app.output_area) {
+                if has_shift {
+                    app.output.scroll_last_table_horizontally(-1);
+                } else {
+                    let before = app.output.last_table_row_offset();
+                    app.output.scroll_last_table_up(5);
+                    let after = app.output.last_table_row_offset();
+                    if before == after {
+                        app.output.scroll_up(3);
+                    }
+                }
+            }
+        }
+        MouseEventKind::ScrollLeft => {
+            app.output.scroll_last_table_horizontally(-5);
+        }
+        MouseEventKind::ScrollRight => {
+            app.output.scroll_last_table_horizontally(5);
+        }
+        MouseEventKind::Down(_button) => {
+            if is_in_area(col, row, app.output_area) {
+                let output_top = app.output_area.y;
+                let output_height = app.output_area.height;
+                if row >= output_top && row < output_top + output_height {
+                    app.scrollbar_dragging = true;
+                    app.drag_target = DragTarget::OutputVertical;
+                    app.drag_origin_row = row;
+                    app.drag_start_offset = app.output.scroll_offset();
+                }
+            }
+        }
+        MouseEventKind::Drag(_button) => {
+            if app.scrollbar_dragging {
+                match app.drag_target {
+                    DragTarget::OutputVertical => {
+                        let row_delta = row as isize - app.drag_origin_row as isize;
+                        let total = app.output.total_visual_lines();
+                        let viewport = app.output_area.height as usize;
+                        let max_offset = total.saturating_sub(viewport);
+                        let new_offset = (app.drag_start_offset as isize + row_delta)
+                            .max(0)
+                            .min(max_offset as isize) as usize;
+                        app.output.set_scroll_offset(new_offset);
+                    }
+                    DragTarget::TableHorizontal => {
+                        let col_delta = row as isize - app.drag_origin_row as isize;
+                        app.output.scroll_last_table_horizontally(col_delta);
+                        app.drag_origin_row = row;
+                    }
+                    DragTarget::None => {}
+                }
+            }
+        }
+        MouseEventKind::Up(_button) => {
+            app.scrollbar_dragging = false;
+            app.drag_target = DragTarget::None;
+        }
+        _ => {}
+    }
+}
+
+fn is_in_area(col: u16, row: u16, area: Rect) -> bool {
+    col >= area.x
+        && col < area.x + area.width
+        && row >= area.y
+        && row < area.y + area.height
+}
+
 async fn execute_query(app: &mut App, input: String) {
     app.status = Status::Running;
 
     // Handle special commands
     let trimmed = input.trim();
-    if trimmed == ":help" || trimmed == "help" || trimmed == "?" {
-        app.show_help = true;
-        app.status = Status::Idle;
-        return;
-    }
     if trimmed == ":quit" || trimmed == "exit" {
         app.quit = true;
         app.status = Status::Idle;
@@ -479,7 +584,7 @@ async fn execute_describe(app: &mut App, desc: &crate::lang::ast::Describe) {
                     ]
                 })
                 .collect();
-            app.output.push(OutputLine::Table { headers, rows, row_offset: 0 });
+            app.output.push(OutputLine::Table { headers, rows, row_offset: 0, col_offset: 0 });
             app.output.scroll_to_bottom();
             app.status = Status::Idle;
         }
@@ -519,6 +624,7 @@ async fn execute_show_tables(app: &mut App, conn: &Option<String>) {
                 headers: vec!["Table (connection)".to_string()],
                 rows,
                 row_offset: 0,
+                col_offset: 0,
             });
             app.output.scroll_to_bottom();
             app.status = Status::Idle;
@@ -533,6 +639,7 @@ async fn execute_show_tables(app: &mut App, conn: &Option<String>) {
                 headers: vec!["Table".to_string()],
                 rows,
                 row_offset: 0,
+                col_offset: 0,
             });
             app.output.scroll_to_bottom();
             app.status = Status::Idle;
@@ -614,7 +721,7 @@ fn push_result(app: &mut App, result: &crate::adapters::QueryResult, timing: Opt
         })
         .collect();
 
-    app.output.push(OutputLine::Table { headers, rows, row_offset: 0 });
+    app.output.push(OutputLine::Table { headers, rows, row_offset: 0, col_offset: 0 });
 
     let row_count = result.rows.len();
     let mut meta = format!("{} row(s) in {:?}", row_count, result.elapsed);

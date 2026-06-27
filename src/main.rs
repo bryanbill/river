@@ -10,8 +10,8 @@ use std::io;
 
 use clap::Parser;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -27,7 +27,7 @@ use crate::adapters::DatabaseAdapter;
 use crate::tui::app;
 
 #[derive(Parser, Debug)]
-#[command(name = "river", version = "0.7.0", about = "Unified Database Access")]
+    #[command(name = "river", version = "0.8.0", about = "Unified Database Access")]
 struct Cli {
     #[arg(short, long, default_value = "river.yaml")]
     config: String,
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         config = %cli.config,
-        "River v0.7.0 — starting..."
+        "River v0.8.0 — starting..."
     );
 
     let connections = load_config(&cli.config)?;
@@ -89,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
     stdout.execute(EnterAlternateScreen)?;
     enable_raw_mode()?;
     stdout.execute(EnableBracketedPaste)?;
+    stdout.execute(EnableMouseCapture)?;
     let _ = stdout.execute(PushKeyboardEnhancementFlags(
         KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
             | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
@@ -101,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
     disable_raw_mode()?;
     let mut stdout = io::stdout();
     let _ = stdout.execute(DisableBracketedPaste);
+    let _ = stdout.execute(DisableMouseCapture);
     let _ = stdout.execute(PopKeyboardEnhancementFlags);
     stdout.execute(LeaveAlternateScreen)?;
 

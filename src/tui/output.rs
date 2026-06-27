@@ -8,6 +8,7 @@ pub enum OutputLine {
         headers: Vec<String>,
         rows: Vec<Vec<String>>,
         row_offset: usize,
+        col_offset: usize,
     },
     #[allow(dead_code)]
     Json(String),
@@ -98,7 +99,7 @@ impl OutputBuffer {
         self.lines.push_back(line);
     }
 
-    fn total_visual_lines(&self) -> usize {
+    pub fn total_visual_lines(&self) -> usize {
         self.lines.iter().map(|l| l.visual_height()).sum()
     }
 
@@ -114,6 +115,16 @@ impl OutputBuffer {
 
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    pub fn set_scroll_offset(&mut self, offset: usize) {
+        let total = self.total_visual_lines();
+        let max_offset = total.saturating_sub(1);
+        self.scroll_offset = offset.min(max_offset);
     }
 
     pub fn scroll_page_up(&mut self, page_size: usize) {
@@ -135,6 +146,15 @@ impl OutputBuffer {
         })
     }
 
+    pub fn last_table_row_offset(&self) -> usize {
+        self.lines.iter().rev()
+            .find_map(|line| match line {
+                OutputLine::Table { row_offset, .. } => Some(*row_offset),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
+
     pub fn scroll_last_table_up(&mut self, amount: usize) {
         if let Some(table) = self.last_table_mut() {
             let current = table.row_offset();
@@ -151,6 +171,13 @@ impl OutputBuffer {
             let max_offset = total.saturating_sub(display);
             let new_offset = (current + amount).min(max_offset);
             table.set_row_offset(new_offset);
+        }
+    }
+
+    pub fn scroll_last_table_horizontally(&mut self, delta: isize) {
+        if let Some(OutputLine::Table { col_offset, headers, .. }) = self.last_table_mut() {
+            let max_col = headers.len().saturating_sub(1);
+            *col_offset = (*col_offset as isize + delta).max(0).min(max_col as isize) as usize;
         }
     }
 
