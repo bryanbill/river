@@ -48,9 +48,7 @@ fn input_height(app: &App, area: Rect, loader_height: u16) -> u16 {
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let conn_info = app
-        .active_connection
-        .as_ref()
-        .map(|c| c.as_str())
+        .active_connection.as_deref()
         .unwrap_or("no connection");
 
     let status_indicator = match app.status {
@@ -408,7 +406,7 @@ fn highlight_json<'a>(json: &'a str, theme: &'a Theme) -> Vec<Span<'a>> {
 }
 
 fn looks_like_bool(chars: &[char], i: usize) -> bool {
-    chars.get(i..).map_or(false, |s| {
+    chars.get(i..).is_some_and(|s| {
         (s.len() >= 4 && s[0] == 't' && s[1] == 'r' && s[2] == 'u' && s[3] == 'e')
             || (s.len() >= 5
                 && s[0] == 'f'

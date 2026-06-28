@@ -93,16 +93,3 @@ pub fn parse(input: &str) -> Result<ast::Statement, RiverError> {
 
     Ok(stmts.into_iter().next().unwrap_or(ast::Statement::Noop))
 }
-
-#[allow(dead_code)]
-pub fn parse_all(input: &str) -> Result<Vec<ast::Statement>, RiverError> {
-    let tokens: Vec<(lexer::Token, Span)> = lexer::lex(input)
-        .into_iter()
-        .map(|s| (s.token, s.span))
-        .collect();
-
-    parser::parser().parse(tokens).map_err(|errors| {
-        let (line, msg) = report_chumsky_errors(input, &errors);
-        RiverError::Parse { line, msg }
-    })
-}

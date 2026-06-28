@@ -27,7 +27,7 @@ use crate::adapters::DatabaseAdapter;
 use crate::tui::app;
 
 #[derive(Parser, Debug)]
-    #[command(name = "river", version = "0.8.0", about = "Unified Database Access")]
+    #[command(name = "river", version = "0.8.1", about = "Unified Database Access")]
 struct Cli {
     #[arg(short, long, default_value = "river.yaml")]
     config: String,
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         config = %cli.config,
-        "River v0.8.0 — starting..."
+        "River v0.8.1 — starting..."
     );
 
     let connections = load_config(&cli.config)?;

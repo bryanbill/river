@@ -1324,9 +1324,8 @@ pub fn parser() -> Parser_<Vec<Statement>> {
                         .boxed(),
                     )
                     .map(|(name, mut action)| {
-                        match &mut action {
-                            AlterAction::AlterColumn { name: n, .. } => *n = name,
-                            _ => {}
+                        if let AlterAction::AlterColumn { name: n, .. } = &mut action {
+                            *n = name;
                         }
                         action
                     });

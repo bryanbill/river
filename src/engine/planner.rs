@@ -7,8 +7,6 @@ pub const CROSS_DB_BATCH_SIZE: usize = 1000;
 pub enum JoinStrategy {
     NestedLoop,
     Hash,
-    #[allow(dead_code)]
-    Merge,
     Auto,
 }
 
