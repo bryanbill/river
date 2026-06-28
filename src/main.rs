@@ -3,6 +3,7 @@ mod connection;
 mod engine;
 mod error;
 mod lang;
+mod mcp;
 mod tui;
 
 use std::collections::HashMap;
@@ -27,16 +28,12 @@ use crate::adapters::DatabaseAdapter;
 use crate::tui::app;
 
 #[derive(Parser, Debug)]
-    #[command(name = "river", version = "0.8.1", about = "Unified Database Access")]
+    #[command(name = "river", version = "0.9.0", about = "Unified Database Access")]
 struct Cli {
     #[arg(short, long, default_value = "river.yaml")]
     config: String,
-}
-
-#[derive(serde::Deserialize)]
-struct ConfigFile {
-    #[serde(default)]
-    connections: Vec<connection::ConnectionConfig>,
+    #[arg(long, default_value = "false")]
+    server: bool,
 }
 
 #[tokio::main]
@@ -56,10 +53,10 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         config = %cli.config,
-        "River v0.8.1 — starting..."
+        "River v0.9.0 — starting..."
     );
 
-    let connections = load_config(&cli.config)?;
+    let connections = connection::config::load_config(&cli.config)?;
 
     let mut adapters: HashMap<String, Box<dyn DatabaseAdapter>> = HashMap::new();
     let mut conn_errors: Vec<String> = Vec::new();
@@ -82,6 +79,10 @@ async fn main() -> anyhow::Result<()> {
         .iter()
         .map(|c| (c.name.clone(), c.kind.clone()))
         .collect();
+
+    if cli.server {
+        return crate::mcp::run_mcp_server(adapters, source_db).await;
+    }
 
     let mut app = app::App::new(adapters, source_db, conn_errors);
 
@@ -107,23 +108,4 @@ async fn main() -> anyhow::Result<()> {
     stdout.execute(LeaveAlternateScreen)?;
 
     result
-}
-
-fn load_config(path: &str) -> anyhow::Result<Vec<connection::ConnectionConfig>> {
-    if !std::path::Path::new(path).exists() {
-        return Ok(Vec::new());
-    }
-
-    let content = std::fs::read_to_string(path)?;
-
-    // Try reading as ConfigFile with `connections:` key first
-    if let Ok(cfg) = serde_yaml::from_str::<ConfigFile>(&content)
-        && !cfg.connections.is_empty()
-    {
-        return Ok(cfg.connections);
-    }
-
-    // Fall back to flat array of ConnectionConfig
-    let connections = serde_yaml::from_str::<Vec<connection::ConnectionConfig>>(&content)?;
-    Ok(connections)
 }

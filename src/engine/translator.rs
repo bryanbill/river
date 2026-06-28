@@ -7,7 +7,7 @@ use crate::adapters::Value;
 use crate::connection::DatabaseKind;
 use crate::lang::ast::*;
 
-pub trait SqlDialect {
+pub trait SqlDialect: Send {
     fn quote_ident(&self, name: &str) -> String;
     fn limit_offset(&self, limit: Option<u64>, offset: Option<u64>) -> String;
     fn kind(&self) -> DatabaseKind;
