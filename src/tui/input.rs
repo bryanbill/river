@@ -59,20 +59,18 @@ impl InputState {
     }
 
     pub fn delete_before_cursor(&mut self) {
-        if self.cursor_pos > 0 {
-            if let Some(prev) = self.prev_char_boundary() {
+        if self.cursor_pos > 0
+            && let Some(prev) = self.prev_char_boundary() {
                 self.text.replace_range(prev..self.cursor_pos, "");
                 self.cursor_pos = prev;
             }
-        }
     }
 
     pub fn delete_at_cursor(&mut self) {
-        if self.cursor_pos < self.text.len() {
-            if let Some(next) = self.next_char_boundary() {
+        if self.cursor_pos < self.text.len()
+            && let Some(next) = self.next_char_boundary() {
                 self.text.replace_range(self.cursor_pos..next, "");
             }
-        }
     }
 
     fn prev_char_boundary(&self) -> Option<usize> {
@@ -285,7 +283,7 @@ impl InputState {
 
     pub fn history_next(&mut self) {
         match self.history_index {
-            None => return,
+            None => (),
             Some(i) if i >= self.history.len() - 1 => {
                 self.history_index = None;
                 self.text = self.saved_input.take().unwrap_or_default();

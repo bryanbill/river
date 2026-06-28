@@ -125,7 +125,7 @@ async fn execute_on_db(
     let adapter = adapters.get(db_name).ok_or_else(|| {
         RiverError::Unsupported(format!("no adapter connected for '{}'", db_name))
     })?;
-    let native = translate_for_kind(query, db_kind);
+    let native = translate_for_kind(query, db_kind)?;
     let mut result = adapter.execute(&native).await?;
     if let Some(alias) = source_alias {
         result.column_sources = vec![Some(alias.to_string()); result.columns.len()];
@@ -133,21 +133,15 @@ async fn execute_on_db(
     Ok(result)
 }
 
-fn translate_for_kind(query: &Query, kind: &DatabaseKind) -> String {
+fn translate_for_kind(query: &Query, kind: &DatabaseKind) -> Result<String, RiverError> {
     match kind {
-        DatabaseKind::Postgres => translate_query(query, &PostgresDialect),
-        DatabaseKind::MySQL => translate_query(query, &MySQLDialect),
-        DatabaseKind::MSSQL => translate_query(query, &MSSQLDialect),
-        DatabaseKind::SQLite => translate_query(query, &SQLiteDialect),
+        DatabaseKind::Postgres => Ok(translate_query(query, &PostgresDialect)),
+        DatabaseKind::MySQL => Ok(translate_query(query, &MySQLDialect)),
+        DatabaseKind::MSSQL => Ok(translate_query(query, &MSSQLDialect)),
+        DatabaseKind::SQLite => Ok(translate_query(query, &SQLiteDialect)),
         DatabaseKind::MongoDB => {
-            // Pass an empty string as the database name; the MongoAdapter will
-            // use its default_db (derived from the connection URI) as fallback.
             serde_json::to_string(&translate_query_mongo(query, ""))
-                .map_err(|e| {
-                    warn!("failed to serialize MongoDB query: {}", e);
-                    e
-                })
-                .unwrap_or_default()
+                .map_err(|e| RiverError::Unsupported(format!("failed to serialize MongoDB query: {}", e)))
         }
     }
 }
@@ -736,7 +730,7 @@ async fn execute_semi_join_fetch(
                     DatabaseKind::MySQL => Box::new(crate::engine::translator::MySQLDialect),
                     DatabaseKind::MSSQL => Box::new(crate::engine::translator::MSSQLDialect),
                     DatabaseKind::SQLite => Box::new(crate::engine::translator::SQLiteDialect),
-                    DatabaseKind::MongoDB => unreachable!(),
+                    DatabaseKind::MongoDB => return Err(RiverError::Unsupported("MongoDB semi-join not supported in SQL probe path".into())),
                 };
                 crate::engine::translator::build_probe_query_sql(
                     &table_name, schema, &probe_key_col, chunk, dialect.as_ref(),
@@ -1572,22 +1566,22 @@ fn eval_binary(op: &BinaryOp, left: &Value, right: &Value) -> Value {
                 Value::Bool(false)
             }
         }
-        BinaryOp::Add => arith_op(left, right, |a, b| a + b, |a, b| a + b),
-        BinaryOp::Sub => arith_op(left, right, |a, b| a - b, |a, b| a - b),
-        BinaryOp::Mul => arith_op(left, right, |a, b| a * b, |a, b| a * b),
-        BinaryOp::Div => arith_op(left, right, |a, b| a / b, |a, b| a / b),
-        BinaryOp::Mod => arith_op(left, right, |a, b| a % b, |a, b| a % b),
+        BinaryOp::Add => arith_op(left, right, |a, b| a.checked_add(b), |a, b| a + b),
+        BinaryOp::Sub => arith_op(left, right, |a, b| a.checked_sub(b), |a, b| a - b),
+        BinaryOp::Mul => arith_op(left, right, |a, b| a.checked_mul(b), |a, b| a * b),
+        BinaryOp::Div => arith_op(left, right, |a, b| a.checked_div(b), |a, b| a / b),
+        BinaryOp::Mod => arith_op(left, right, |a, b| a.checked_rem(b), |a, b| a % b),
         _ => Value::Null,
     }
 }
 
 fn arith_op<F1, F2>(left: &Value, right: &Value, int_op: F1, float_op: F2) -> Value
 where
-    F1: Fn(i64, i64) -> i64,
+    F1: Fn(i64, i64) -> Option<i64>,
     F2: Fn(f64, f64) -> f64,
 {
     match (left, right) {
-        (Value::Int(a), Value::Int(b)) => Value::Int(int_op(*a, *b)),
+        (Value::Int(a), Value::Int(b)) => int_op(*a, *b).map(Value::Int).unwrap_or(Value::Null),
         (Value::Float(a), Value::Float(b)) => Value::Float(float_op(*a, *b)),
         (Value::Int(a), Value::Float(b)) => Value::Float(float_op(*a as f64, *b)),
         (Value::Float(a), Value::Int(b)) => Value::Float(float_op(*a, *b as f64)),
@@ -2505,7 +2499,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let sql = translate_for_kind(&q, &crate::connection::DatabaseKind::Postgres);
+        let sql = translate_for_kind(&q, &crate::connection::DatabaseKind::Postgres).unwrap();
         assert_eq!(sql, r#"SELECT * FROM "users""#);
     }
 
@@ -2521,7 +2515,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let sql = translate_for_kind(&q, &crate::connection::DatabaseKind::MySQL);
+        let sql = translate_for_kind(&q, &crate::connection::DatabaseKind::MySQL).unwrap();
         assert_eq!(sql, "SELECT * FROM `users`");
     }
 

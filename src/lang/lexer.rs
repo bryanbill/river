@@ -318,17 +318,14 @@ impl fmt::Display for Token {
     }
 }
 
-pub struct Lexer<'a> {
-    #[allow(dead_code)]
-    input: &'a str,
+pub struct Lexer {
     chars: Vec<char>,
     pos: usize,
 }
 
-impl<'a> Lexer<'a> {
-    pub fn new(input: &'a str) -> Self {
+impl Lexer {
+    pub fn new(input: &str) -> Self {
         Self {
-            input,
             chars: input.chars().collect(),
             pos: 0,
         }

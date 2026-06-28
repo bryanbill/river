@@ -809,9 +809,7 @@ pub fn translate_alter_table(at: &AlterTable, dialect: &dyn SqlDialect) -> Strin
                         ));
                     }
                     DatabaseKind::SQLite => {
-                        clauses.push(format!(
-                            "-- ALTER COLUMN TYPE not supported in SQLite"
-                        ));
+                        clauses.push("-- ALTER COLUMN TYPE not supported in SQLite".to_string());
                     }
                     _ => clauses.push(format!(
                         "ALTER COLUMN {} TYPE {}",

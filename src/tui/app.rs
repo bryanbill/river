@@ -73,7 +73,7 @@ impl App {
         let mut output = OutputBuffer::new(10_000);
 
         output.push(OutputLine::Info(
-            "River v0.8.0 — Unified Database Access".into(),
+            "River v0.8.1 — Unified Database Access".into(),
         ));
 
         let connected: Vec<&str> = adapters.keys().map(|s| s.as_str()).collect();
@@ -716,7 +716,7 @@ fn push_result(app: &mut App, result: &crate::adapters::QueryResult, timing: Opt
         .iter()
         .map(|row| {
             row.iter()
-                .map(|v| format_value(v))
+                .map(format_value)
                 .collect()
         })
         .collect();
@@ -726,11 +726,10 @@ fn push_result(app: &mut App, result: &crate::adapters::QueryResult, timing: Opt
     let row_count = result.rows.len();
     let mut meta = format!("{} row(s) in {:?}", row_count, result.elapsed);
 
-    if let Some(t) = &timing {
-        if !t.sources.is_empty() {
+    if let Some(t) = &timing
+        && !t.sources.is_empty() {
             meta.push_str(&format!(" [sources: {}]", t.sources));
         }
-    }
 
     app.output.push(OutputLine::Info(meta));
     app.output.scroll_to_bottom();
@@ -783,11 +782,10 @@ fn save_history(input: &InputState) {
     let mut seen = std::collections::HashSet::new();
     let mut lines: Vec<String> = Vec::new();
     for entry in input.history.iter().rev() {
-        if seen.insert(entry.as_str()) {
-            if let Ok(json) = serde_json::to_string(entry) {
+        if seen.insert(entry.as_str())
+            && let Ok(json) = serde_json::to_string(entry) {
                 lines.push(json);
             }
-        }
     }
     lines.reverse();
     if lines.len() > MAX_HISTORY {
