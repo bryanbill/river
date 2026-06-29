@@ -114,6 +114,7 @@ fn ident_or_keyword() -> impl Parser<Spanned, String, Error = PErr> {
         Token::Cascade => Ok("cascade".to_string()),
         Token::Restrict => Ok("restrict".to_string()),
         Token::Database => Ok("database".to_string()),
+        Token::AiQuery => Ok("ai_query".to_string()),
         _ => Err(Simple::custom(s, "expected identifier")),
     })
 }
@@ -490,6 +491,36 @@ fn cast_fn(expr: Parser_<Expression>) -> Parser_<Expression> {
         .boxed()
 }
 
+fn ai_query_call(expr: Parser_<Expression>) -> Parser_<Expression> {
+    let two_arg = tok(Token::AiQuery)
+        .ignore_then(tok(Token::LParen))
+        .ignore_then(string_raw())
+        .then_ignore(tok(Token::Comma))
+        .then(expr.clone())
+        .then_ignore(tok(Token::RParen))
+        .map(|(config, prompt)| Expression::AiQuery {
+            config,
+            model: None,
+            prompt: Box::new(prompt),
+        });
+
+    let three_arg = tok(Token::AiQuery)
+        .ignore_then(tok(Token::LParen))
+        .ignore_then(string_raw())
+        .then_ignore(tok(Token::Comma))
+        .then(string_raw())
+        .then_ignore(tok(Token::Comma))
+        .then(expr)
+        .then_ignore(tok(Token::RParen))
+        .map(|((config, model), prompt)| Expression::AiQuery {
+            config,
+            model: Some(model),
+            prompt: Box::new(prompt),
+        });
+
+    three_arg.or(two_arg).boxed()
+}
+
 fn order_by_item(expr: Parser_<Expression>) -> Parser_<OrderBy> {
     expr.clone()
         .then(
@@ -621,6 +652,7 @@ fn make_expr_parser(query_p: Parser_<Query>) -> Parser_<Expression> {
             tok(Token::Null).map(|_| Expression::Null).boxed(),
             param().map(Expression::NamedParam).boxed(),
             interval_literal().boxed(),
+            ai_query_call(expr.clone()).boxed(),
             window_fn_call(expr.clone()).boxed(),
             ident_or_call(expr.clone()).boxed(),
             array_lit(expr.clone()).boxed(),

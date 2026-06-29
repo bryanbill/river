@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::connection::DatabaseKind;
+use crate::ai::AiClient;
+use crate::connection::{AiConfig, DatabaseKind};
 
 use super::tools;
 
@@ -129,9 +130,11 @@ fn test_tool_dispatch_unknown_tool() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let adapters: HashMap<String, Box<dyn crate::adapters::DatabaseAdapter>> = HashMap::new();
     let source_db: Vec<(String, DatabaseKind)> = vec![];
+    let ai_configs: HashMap<String, AiConfig> = HashMap::new();
+    let ai_client = AiClient::new();
 
     let result = rt
-        .block_on(tools::dispatch(&adapters, &source_db, "nonexistent_tool", None))
+        .block_on(tools::dispatch(&adapters, &source_db, &ai_configs, &ai_client, "nonexistent_tool", None))
         .expect("dispatch should succeed");
 
     assert_eq!(result.is_error, Some(true));
@@ -142,6 +145,8 @@ fn test_tool_dispatch_parse_error() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let adapters: HashMap<String, Box<dyn crate::adapters::DatabaseAdapter>> = HashMap::new();
     let source_db: Vec<(String, DatabaseKind)> = vec![];
+    let ai_configs: HashMap<String, AiConfig> = HashMap::new();
+    let ai_client = AiClient::new();
 
     let mut args = serde_json::Map::new();
     args.insert(
@@ -152,6 +157,8 @@ fn test_tool_dispatch_parse_error() {
     let result = rt.block_on(tools::dispatch(
         &adapters,
         &source_db,
+        &ai_configs,
+        &ai_client,
         "riverql_query",
         Some(args),
     ));

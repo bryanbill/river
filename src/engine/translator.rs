@@ -106,6 +106,7 @@ pub fn dialect_for(kind: &DatabaseKind) -> Box<dyn SqlDialect> {
         DatabaseKind::MSSQL => Box::new(MSSQLDialect),
         DatabaseKind::SQLite => Box::new(SQLiteDialect),
         DatabaseKind::MongoDB => Box::new(PostgresDialect), // fallback
+        DatabaseKind::AI => Box::new(PostgresDialect), // fallback
     }
 }
 
@@ -244,6 +245,7 @@ fn translate_literal(expr: &Expression, _dialect: &dyn SqlDialect) -> String {
             DatabaseKind::MSSQL => format!("@{}", name),
             DatabaseKind::SQLite => "?".to_string(),
             DatabaseKind::MongoDB => format!(":{}", name),
+            DatabaseKind::AI => format!("${}", name),
         },
         Expression::Interval { value, unit } => {
             let unit_str = interval_unit_to_sql(unit, _dialect);
@@ -256,6 +258,10 @@ fn translate_literal(expr: &Expression, _dialect: &dyn SqlDialect) -> String {
                 }
                 _ => format!("INTERVAL {} {}", value, unit_str),
             }
+        }
+        Expression::AiQuery { .. } => {
+            warn!("AiQuery should not reach translator — it is stripped during planning");
+            "NULL".to_string()
         }
     }
 }
@@ -1032,6 +1038,10 @@ fn translate_expr_mongo(expr: &Expression) -> JsonValue {
         Expression::Interval { value, unit } => {
             let unit_str = unit.to_string();
             json!({"$interval": {"value": value, "unit": unit_str}})
+        }
+        Expression::AiQuery { .. } => {
+            warn!("AiQuery should not reach MongoDB translator");
+            JsonValue::Null
         }
     }
 }

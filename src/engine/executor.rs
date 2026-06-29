@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::adapters::{DatabaseAdapter, QueryResult, Value};
-use crate::connection::DatabaseKind;
+use crate::ai::AiClient;
+use crate::connection::{AiConfig, DatabaseKind};
 use crate::engine::planner::{JoinStrategy, PlanNode, QueryPlan};
 use crate::engine::translator::*;
 use crate::lang::ast::*;
@@ -13,10 +14,11 @@ use tracing::warn;
 pub async fn execute_plan(
     plan: &QueryPlan,
     adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
+    ai_client: &AiClient,
 ) -> Result<QueryResult, RiverError> {
     let start = Instant::now();
     let has_limit = plan_has_limit(&plan.root);
-    let mut result = execute_node(&plan.root, adapters, has_limit).await?;
+    let mut result = execute_node(&plan.root, adapters, ai_client, has_limit).await?;
     result.elapsed = start.elapsed();
     Ok(result)
 }
@@ -34,6 +36,7 @@ fn plan_has_limit(node: &PlanNode) -> bool {
         | PlanNode::Union { left, right, .. } => plan_has_limit(left) || plan_has_limit(right),
         PlanNode::SemiJoinFetch { build, .. } => plan_has_limit(build),
         PlanNode::CreateTableAs { query_plan, .. } => plan_has_limit(query_plan),
+        PlanNode::AiProject { input, .. } => plan_has_limit(input),
         PlanNode::Scan { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::AlterTable { .. } | PlanNode::DropTable { .. } | PlanNode::CreateDatabase { .. } | PlanNode::DropDatabase { .. } | PlanNode::ConnectionError { .. } => false,
     }
 }
@@ -42,34 +45,35 @@ pub async fn execute_statement(
     stmt: &Statement,
     source_db: &[(String, DatabaseKind)],
     adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
+    ai_configs: &HashMap<String, AiConfig>,
+    ai_client: &AiClient,
 ) -> Result<QueryResult, RiverError> {
     match stmt {
         Statement::With(w) => {
             let mut cte_data: HashMap<String, QueryResult> = HashMap::new();
             for cte in &w.ctes {
                 let cte_stmt = Statement::Query(*cte.query.clone());
-                let mut plan = crate::engine::planner::plan_statement(&cte_stmt, source_db);
+                let mut plan = crate::engine::planner::plan_statement(&cte_stmt, source_db, ai_configs);
                 replace_cte_scans(&mut plan.root, &cte_data);
-                let mut result = execute_plan(&plan, adapters).await?;
+                let mut result = execute_plan(&plan, adapters, ai_client).await?;
 
-                // Handle set operations in CTE body (UNION, INTERSECT, etc.)
                 for (kind, q) in &cte.chain {
                     let chain_stmt = Statement::Query(q.clone());
-                    let mut chain_plan = crate::engine::planner::plan_statement(&chain_stmt, source_db);
+                    let mut chain_plan = crate::engine::planner::plan_statement(&chain_stmt, source_db, ai_configs);
                     replace_cte_scans(&mut chain_plan.root, &cte_data);
-                    let right = execute_plan(&chain_plan, adapters).await?;
+                    let right = execute_plan(&chain_plan, adapters, ai_client).await?;
                     result = union_results(result, right, matches!(kind, SetOpKind::UnionAll))?;
                 }
 
                 cte_data.insert(cte.name.clone(), result);
             }
-            let mut plan = crate::engine::planner::plan_statement(w.body.as_ref(), source_db);
+            let mut plan = crate::engine::planner::plan_statement(w.body.as_ref(), source_db, ai_configs);
             replace_cte_scans(&mut plan.root, &cte_data);
-            execute_plan(&plan, adapters).await
+            execute_plan(&plan, adapters, ai_client).await
         }
         _ => {
-            let plan = crate::engine::planner::plan_statement(stmt, source_db);
-            execute_plan(&plan, adapters).await
+            let plan = crate::engine::planner::plan_statement(stmt, source_db, ai_configs);
+            execute_plan(&plan, adapters, ai_client).await
         }
     }
 }
@@ -100,6 +104,9 @@ fn replace_cte_scans(node: &mut PlanNode, cte_data: &HashMap<String, QueryResult
         }
         PlanNode::SemiJoinFetch { build, .. } => {
             replace_cte_scans(build, cte_data);
+        }
+        PlanNode::AiProject { input, .. } => {
+            replace_cte_scans(input, cte_data);
         }
         PlanNode::CreateTableAs { query_plan, .. } => {
             replace_cte_scans(query_plan, cte_data);
@@ -143,6 +150,9 @@ fn translate_for_kind(query: &Query, kind: &DatabaseKind) -> Result<String, Rive
             serde_json::to_string(&translate_query_mongo(query, ""))
                 .map_err(|e| RiverError::Unsupported(format!("failed to serialize MongoDB query: {}", e)))
         }
+        DatabaseKind::AI => Err(RiverError::Unsupported(
+            "AI connections cannot execute database queries".into(),
+        )),
     }
 }
 
@@ -175,6 +185,7 @@ fn find_single_db(node: &PlanNode) -> Option<(String, DatabaseKind)> {
         PlanNode::DropTable { database, .. } => Some(database.clone()),
         PlanNode::CreateDatabase { database, .. } => Some(database.clone()),
         PlanNode::DropDatabase { database, .. } => Some(database.clone()),
+        PlanNode::AiProject { input, .. } => find_single_db(input),
         PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ConnectionError { .. } => None,
     }
 }
@@ -259,6 +270,7 @@ fn collect_single_db_query(node: &PlanNode) -> Option<(String, DatabaseKind, Que
             });
             Some((ldb_name, ldb_kind, q))
         }
+        PlanNode::AiProject { .. } => None,
         PlanNode::Union { .. } | PlanNode::SemiJoinFetch { .. } | PlanNode::InlineData { .. } | PlanNode::Empty | PlanNode::ListTables { .. } | PlanNode::DescribeTable { .. } | PlanNode::Dml { .. } | PlanNode::CreateTable { .. } | PlanNode::CreateTableAs { .. } | PlanNode::AlterTable { .. } | PlanNode::DropTable { .. } | PlanNode::CreateDatabase { .. } | PlanNode::DropDatabase { .. } | PlanNode::ConnectionError { .. } => None,
     }
 }
@@ -266,6 +278,7 @@ fn collect_single_db_query(node: &PlanNode) -> Option<(String, DatabaseKind, Que
 async fn execute_node(
     node: &PlanNode,
     adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
+    ai_client: &AiClient,
     bounded: bool,
 ) -> Result<QueryResult, RiverError> {
     if let Some((db_name, db_kind, query)) = collect_single_db_query(node) {
@@ -319,33 +332,33 @@ async fn execute_node(
                     let right_alias = find_source_alias(right);
                     execute_on_db(&rdb_name, &rdb_kind, &rquery, right_alias.as_deref(), adapters).await?
                 } else {
-                    Box::pin(execute_node(right, adapters, true)).await?
+                    Box::pin(execute_node(right, adapters, ai_client, true)).await?
                 }
             } else {
-                Box::pin(execute_node(right, adapters, bounded)).await?
+                Box::pin(execute_node(right, adapters, ai_client, bounded)).await?
             };
 
-            let left_result = Box::pin(execute_node(left, adapters, bounded)).await?;
+            let left_result = Box::pin(execute_node(left, adapters, ai_client, bounded)).await?;
             join_results(left_result, right_result, condition, strategy, *join_kind, *limit)
         }
         PlanNode::Filter { input, condition } => {
-            let result = Box::pin(execute_node(input, adapters, bounded)).await?;
+            let result = Box::pin(execute_node(input, adapters, ai_client, bounded)).await?;
             apply_filter(&result, condition)
         }
         PlanNode::Project { input, fields } => {
-            let result = Box::pin(execute_node(input, adapters, bounded)).await?;
+            let result = Box::pin(execute_node(input, adapters, ai_client, bounded)).await?;
             apply_projection(&result, fields)
         }
         PlanNode::Order { input, order_by } => {
-            let result = Box::pin(execute_node(input, adapters, bounded)).await?;
+            let result = Box::pin(execute_node(input, adapters, ai_client, bounded)).await?;
             apply_order(&result, order_by)
         }
         PlanNode::Limit { input, limit, offset } => {
-            let result = Box::pin(execute_node(input, adapters, true)).await?;
+            let result = Box::pin(execute_node(input, adapters, ai_client, true)).await?;
             apply_limit(&result, *limit, *offset)
         }
         PlanNode::Aggregate { input, group_by, aggs, having } => {
-            let result = Box::pin(execute_node(input, adapters, bounded)).await?;
+            let result = Box::pin(execute_node(input, adapters, ai_client, bounded)).await?;
             let mut agg_result = apply_aggregate(&result, group_by, aggs)?;
             if let Some(having_cond) = having {
                 agg_result = apply_filter(&agg_result, having_cond)?;
@@ -353,12 +366,12 @@ async fn execute_node(
             Ok(agg_result)
         }
         PlanNode::Distinct { input } => {
-            let result = Box::pin(execute_node(input, adapters, bounded)).await?;
+            let result = Box::pin(execute_node(input, adapters, ai_client, bounded)).await?;
             apply_distinct(&result)
         }
         PlanNode::Union { left, right, all } => {
-            let lf = Box::pin(execute_node(left, adapters, bounded));
-            let rf = Box::pin(execute_node(right, adapters, bounded));
+            let lf = Box::pin(execute_node(left, adapters, ai_client, bounded));
+            let rf = Box::pin(execute_node(right, adapters, ai_client, bounded));
             let (lr, rr) = tokio::join!(lf, rf);
             union_results(lr?, rr?, *all)
         }
@@ -380,7 +393,7 @@ async fn execute_node(
         } => {
             execute_semi_join_fetch(
                 build, probe_source, probe_database, build_key, probe_key,
-                *join_kind, condition, adapters,
+                *join_kind, condition, adapters, ai_client,
             ).await
         }
         PlanNode::ListTables { database } => {
@@ -449,7 +462,7 @@ async fn execute_node(
             target_schema,
             on_conflict,
         } => {
-            let query_result = Box::pin(execute_node(query_plan, adapters, bounded)).await?;
+            let query_result = Box::pin(execute_node(query_plan, adapters, ai_client, bounded)).await?;
 
             if query_result.rows.is_empty() {
                 return Ok(QueryResult {
@@ -634,6 +647,39 @@ async fn execute_node(
             })?;
             adapter.exec_maintenance(sql).await
         }
+        PlanNode::AiProject { input, ai_columns, ai_configs } => {
+            let result = Box::pin(execute_node(input, adapters, ai_client, bounded)).await?;
+
+            let new_rows = crate::ai::client::execute_ai_columns(
+                ai_client,
+                ai_configs.clone(),
+                ai_columns,
+                &result.columns,
+                &result.column_sources,
+                &result.rows,
+                eval_expr,
+            ).await;
+
+            let mut new_columns = result.columns.clone();
+            for col in ai_columns {
+                let name = col.alias.clone().unwrap_or_else(|| format!("ai_query"));
+                new_columns.push(name);
+            }
+
+            let new_sources = {
+                let mut s = result.column_sources.clone();
+                s.resize(new_columns.len(), None);
+                s
+            };
+
+            Ok(QueryResult {
+                columns: new_columns,
+                column_sources: new_sources,
+                rows: new_rows,
+                elapsed: result.elapsed,
+                rows_affected: result.rows_affected,
+            })
+        }
         PlanNode::ConnectionError { message } => Err(RiverError::Unsupported(message.clone())),
         PlanNode::Scan { source, .. } => {
             if let SourceKind::CteRef(_) = &source.kind {
@@ -659,11 +705,12 @@ async fn execute_semi_join_fetch(
     join_kind: JoinKind,
     condition: &Expression,
     adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
+    ai_client: &AiClient,
 ) -> Result<QueryResult, RiverError> {
     use crate::engine::planner::CROSS_DB_BATCH_SIZE;
 
     // 1. Execute the build side
-    let build_result = Box::pin(execute_node(build, adapters, false)).await?;
+    let build_result = Box::pin(execute_node(build, adapters, ai_client, false)).await?;
 
     if build_result.rows.is_empty() {
         return Ok(empty_result());
@@ -731,6 +778,7 @@ async fn execute_semi_join_fetch(
                     DatabaseKind::MSSQL => Box::new(crate::engine::translator::MSSQLDialect),
                     DatabaseKind::SQLite => Box::new(crate::engine::translator::SQLiteDialect),
                     DatabaseKind::MongoDB => return Err(RiverError::Unsupported("MongoDB semi-join not supported in SQL probe path".into())),
+                    DatabaseKind::AI => return Err(RiverError::Unsupported("AI connections cannot be used in semi-join".into())),
                 };
                 crate::engine::translator::build_probe_query_sql(
                     &table_name, schema, &probe_key_col, chunk, dialect.as_ref(),
@@ -1462,11 +1510,21 @@ fn union_results(
 
 // ── Expression evaluation ──────────────────────────────────────────────────
 
+fn value_to_string(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        Value::Int(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Bool(b) => b.to_string(),
+    }
+}
+
 fn eval_expr_bool(expr: &Expression, columns: &[String], column_sources: &[Option<String>], row: &[Value]) -> bool {
     matches!(eval_expr(expr, columns, column_sources, row), Value::Bool(true))
 }
 
-fn eval_expr(expr: &Expression, columns: &[String], column_sources: &[Option<String>], row: &[Value]) -> Value {
+pub fn eval_expr(expr: &Expression, columns: &[String], column_sources: &[Option<String>], row: &[Value]) -> Value {
     match expr {
         Expression::String(s) => Value::String(s.clone()),
         Expression::Number(n) => Value::Float(*n),
@@ -1539,6 +1597,56 @@ fn eval_expr(expr: &Expression, columns: &[String], column_sources: &[Option<Str
         }
         Expression::Array(_) => Value::String("[...]".into()),
         Expression::Object(_) => Value::String("{...}".into()),
+        Expression::FnCall { name, args } => {
+            let evaluated: Vec<Value> = args
+                .iter()
+                .map(|a| eval_expr(a, columns, column_sources, row))
+                .collect();
+            match name.to_lowercase().as_str() {
+                "concat" => {
+                    let s: String = evaluated
+                        .iter()
+                        .map(|v| value_to_string(v))
+                        .collect();
+                    Value::String(s)
+                }
+                "now" | "current_timestamp" => {
+                    let now = time::OffsetDateTime::now_utc();
+                    Value::String(
+                        now.format(&time::macros::format_description!(
+                            "[year]-[month]-[day] [hour]:[minute]:[second]"
+                        ))
+                        .unwrap_or_else(|_| now.to_string()),
+                    )
+                }
+                "coalesce" => {
+                    for v in &evaluated {
+                        if !matches!(v, Value::Null) {
+                            return v.clone();
+                        }
+                    }
+                    Value::Null
+                }
+                "replace" => {
+                    if evaluated.len() >= 3 {
+                        let s = value_to_string(&evaluated[0]);
+                        let from = value_to_string(&evaluated[1]);
+                        let to = value_to_string(&evaluated[2]);
+                        Value::String(s.replace(&from, &to))
+                    } else {
+                        Value::Null
+                    }
+                }
+                _ => {
+                    let s: String = evaluated
+                        .iter()
+                        .map(|v| value_to_string(v))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Value::String(s)
+                }
+            }
+        }
         _ => Value::Null,
     }
 }
@@ -2616,7 +2724,9 @@ where ut.revenue > 1000
 order by ut.revenue desc"#;
 
         let stmt = parse(query).expect("parse failed");
-        let result = execute_statement(&stmt, &source_db, &adapters)
+        let ai_configs = std::collections::HashMap::new();
+        let ai_client = crate::ai::AiClient::new();
+        let result = execute_statement(&stmt, &source_db, &adapters, &ai_configs, &ai_client)
             .await
             .expect("execution failed");
 
@@ -2637,7 +2747,9 @@ order by ut.revenue desc"#;
         let query = r#"with paid_orders as ( find * from orders where status = "paid" ) find [id, total] from paid_orders"#;
 
         let stmt = parse(query).expect("parse failed");
-        let result = execute_statement(&stmt, &source_db, &adapters)
+        let ai_configs = std::collections::HashMap::new();
+        let ai_client = crate::ai::AiClient::new();
+        let result = execute_statement(&stmt, &source_db, &adapters, &ai_configs, &ai_client)
             .await
             .expect("execution failed");
 
@@ -2654,7 +2766,9 @@ order by ut.revenue desc"#;
         let query = r#"with all_orders as ( find * from orders ) find [user_id, sum(total) as revenue] from all_orders group by user_id"#;
 
         let stmt = parse(query).expect("parse failed");
-        let result = execute_statement(&stmt, &source_db, &adapters)
+        let ai_configs = std::collections::HashMap::new();
+        let ai_client = crate::ai::AiClient::new();
+        let result = execute_statement(&stmt, &source_db, &adapters, &ai_configs, &ai_client)
             .await
             .expect("execution failed");
 
@@ -2682,7 +2796,9 @@ order by ut.revenue desc"#;
         let query = r#"with all_orders as ( find * from orders ) find [count(*) as cnt] from all_orders"#;
 
         let stmt = parse(query).expect("parse failed");
-        let result = execute_statement(&stmt, &source_db, &adapters)
+        let ai_configs = std::collections::HashMap::new();
+        let ai_client = crate::ai::AiClient::new();
+        let result = execute_statement(&stmt, &source_db, &adapters, &ai_configs, &ai_client)
             .await
             .expect("execution failed");
 
@@ -2704,7 +2820,9 @@ order by ut.revenue desc"#;
         let query =
             r#"find [u.name, o.total] from users@pg as u cross join orders@mysql as o"#;
         let stmt = parse(query).expect("parse failed");
-        let result = execute_statement(&stmt, &source_db, &adapters).await;
+        let ai_configs = std::collections::HashMap::new();
+        let ai_client = crate::ai::AiClient::new();
+        let result = execute_statement(&stmt, &source_db, &adapters, &ai_configs, &ai_client).await;
         assert!(
             result.is_err(),
             "Expected error for unbounded cross-DB cross join"
@@ -2730,7 +2848,9 @@ order by ut.revenue desc"#;
         let query =
             r#"find [u.name, o.total] from users@pg as u cross join orders@mysql as o limit 5"#;
         let stmt = parse(query).expect("parse failed");
-        let result = execute_statement(&stmt, &source_db, &adapters).await;
+        let ai_configs = std::collections::HashMap::new();
+        let ai_client = crate::ai::AiClient::new();
+        let result = execute_statement(&stmt, &source_db, &adapters, &ai_configs, &ai_client).await;
         assert!(
             result.is_ok(),
             "cross-DB cross join with LIMIT should work: {:?}",
@@ -2751,7 +2871,9 @@ order by ut.revenue desc"#;
         let query =
             r#"find [u.name, o.total] from users@pg as u join orders@mysql as o on u.id = o.user_id"#;
         let stmt = parse(query).expect("parse failed");
-        let result = execute_statement(&stmt, &source_db, &adapters).await;
+        let ai_configs = std::collections::HashMap::new();
+        let ai_client = crate::ai::AiClient::new();
+        let result = execute_statement(&stmt, &source_db, &adapters, &ai_configs, &ai_client).await;
         assert!(
             result.is_ok(),
             "SemiJoinFetch should execute successfully: {:?}",

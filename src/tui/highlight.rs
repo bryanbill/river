@@ -44,6 +44,7 @@ pub fn token_kind(token: &Token) -> TokenKind {
         | Token::Type | Token::Cascade | Token::Restrict | Token::Database => TokenKind::Keyword,
 
         Token::Coalesce | Token::Nullif | Token::Ifnull | Token::Cast | Token::Now
+        | Token::AiQuery
         | Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max
         | Token::CountDistinct | Token::Any | Token::Some => TokenKind::Function,
 

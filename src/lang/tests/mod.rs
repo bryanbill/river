@@ -1335,3 +1335,80 @@ fn parse_drop_database_if_exists_at_connection() {
         other => panic!("Expected DropDatabase, got {:?}", other),
     }
 }
+
+#[test]
+fn parse_ai_query_two_args() {
+    let result = parse_one(r#"find [ai_query("openai", text) as summary] from reviews"#);
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    let stmts = result.unwrap();
+    match &stmts[0] {
+        Statement::Query(q) => {
+            assert_eq!(q.projection.len(), 1);
+            match &q.projection[0] {
+                Projection::Expr(Expression::AiQuery { config, model, .. }, alias) => {
+                    assert_eq!(config, "openai");
+                    assert!(model.is_none());
+                    assert_eq!(alias.as_deref(), Some("summary"));
+                }
+                other => panic!("Expected AiQuery projection, got {:?}", other),
+            }
+        }
+        other => panic!("Expected Query, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_ai_query_three_args() {
+    let result = parse_one(r#"find [ai_query("openai", "gpt-4o-mini", text) as category] from items"#);
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    let stmts = result.unwrap();
+    match &stmts[0] {
+        Statement::Query(q) => {
+            match &q.projection[0] {
+                Projection::Expr(Expression::AiQuery { config, model, .. }, alias) => {
+                    assert_eq!(config, "openai");
+                    assert_eq!(model.as_deref(), Some("gpt-4o-mini"));
+                    assert_eq!(alias.as_deref(), Some("category"));
+                }
+                other => panic!("Expected AiQuery projection, got {:?}", other),
+            }
+        }
+        other => panic!("Expected Query, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_ai_query_with_concat() {
+    let result = parse_one(r#"find [name, ai_query("openai", concat("Summarize: ", text)) as summary] from reviews"#);
+    assert!(result.is_ok(), "parse error: {:?}", result.err());
+    let stmts = result.unwrap();
+    match &stmts[0] {
+        Statement::Query(q) => {
+            assert_eq!(q.projection.len(), 2);
+            match &q.projection[1] {
+                Projection::Expr(Expression::AiQuery { config, prompt, .. }, alias) => {
+                    assert_eq!(config, "openai");
+                    assert_eq!(alias.as_deref(), Some("summary"));
+                    match prompt.as_ref() {
+                        Expression::FnCall { name, .. } => assert_eq!(name, "concat"),
+                        other => panic!("Expected concat FnCall, got {:?}", other),
+                    }
+                }
+                other => panic!("Expected AiQuery, got {:?}", other),
+            }
+        }
+        other => panic!("Expected Query, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_ai_query_wrong_arg_count() {
+    let result = parse_one(r#"find [ai_query("openai") as x] from t"#);
+    assert!(result.is_err(), "Expected error for 1-arg ai_query");
+}
+
+#[test]
+fn parse_ai_query_four_args_error() {
+    let result = parse_one(r#"find [ai_query("openai", "gpt-4o", text, "extra") as x] from t"#);
+    assert!(result.is_err(), "Expected error for 4-arg ai_query");
+}

@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use river::adapters::{create_adapter, DatabaseAdapter, QueryResult, Value};
-use river::connection::{ConnectionConfig, DatabaseKind};
+use river::ai::AiClient;
+use river::connection::{AiConfig, ConnectionConfig, DatabaseKind};
 use river::engine::executor::execute_statement;
 use river::error::RiverError;
 use river::lang::parse;
@@ -12,6 +13,8 @@ use river::lang::parse;
 pub struct TestContext {
     pub adapters: HashMap<String, Box<dyn DatabaseAdapter>>,
     pub source_db: Vec<(String, DatabaseKind)>,
+    pub ai_configs: HashMap<String, AiConfig>,
+    pub ai_client: AiClient,
 }
 
 impl TestContext {
@@ -43,6 +46,9 @@ impl TestContext {
         let mut source_db: Vec<(String, DatabaseKind)> = Vec::new();
 
         for config in &configs {
+            if matches!(config.kind, DatabaseKind::AI) {
+                continue;
+            }
             let adapter = create_adapter(config).await.unwrap_or_else(|e| {
                 panic!(
                     "Failed to connect to '{}' ({:?}) at {}: {}\n\
@@ -54,9 +60,18 @@ impl TestContext {
             adapters.insert(config.name.clone(), adapter);
         }
 
+        let ai_configs_vec = river::connection::config::load_ai_configs(&config_path)
+            .unwrap_or_else(|e| panic!("Failed to load AI configs from {}: {}", config_path, e));
+        let mut ai_configs: HashMap<String, AiConfig> = HashMap::new();
+        for cfg in ai_configs_vec {
+            ai_configs.insert(cfg.name.clone(), cfg);
+        }
+
         Self {
             adapters,
             source_db,
+            ai_configs,
+            ai_client: AiClient::new(),
         }
     }
 }
@@ -64,7 +79,7 @@ impl TestContext {
 /// Parse a RiverQL query, plan it, and execute it against the test context's adapters.
 pub async fn execute_river(ctx: &TestContext, query: &str) -> Result<QueryResult, RiverError> {
     let stmt = parse(query)?;
-    execute_statement(&stmt, &ctx.source_db, &ctx.adapters).await
+    execute_statement(&stmt, &ctx.source_db, &ctx.adapters, &ctx.ai_configs, &ctx.ai_client).await
 }
 
 /// Execute raw SQL/JSON directly against an adapter (for cleanup operations like DROP TABLE).

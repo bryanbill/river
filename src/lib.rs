@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod ai;
 pub mod connection;
 pub mod engine;
 pub mod error;

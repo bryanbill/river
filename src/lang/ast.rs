@@ -229,6 +229,12 @@ pub enum Expression {
         value: f64,
         unit: IntervalUnit,
     },
+
+    AiQuery {
+        config: String,
+        model: Option<String>,
+        prompt: Box<Expression>,
+    },
 }
 
 // Custom PartialEq because f64 doesn't implement Eq
@@ -279,6 +285,9 @@ impl PartialEq for Expression {
             (Expression::NamedParam(a), Expression::NamedParam(b)) => a == b,
             (Expression::Interval { value: v1, unit: u1 }, Expression::Interval { value: v2, unit: u2 }) => {
                 v1.to_bits() == v2.to_bits() && u1 == u2
+            }
+            (Expression::AiQuery { config: c1, model: m1, prompt: p1 }, Expression::AiQuery { config: c2, model: m2, prompt: p2 }) => {
+                c1 == c2 && m1 == m2 && p1 == p2
             }
             _ => false,
         }
