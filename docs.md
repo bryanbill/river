@@ -4,6 +4,100 @@ RiverQL is a universal query language for interacting with PostgreSQL, MySQL, SQ
 
 ---
 
+## MCP Server
+
+River ships with an MCP (Model Context Protocol) server that exposes the query engine to AI agents. Start it with the `--server` flag:
+
+```bash
+river --server
+river --server --config /path/to/river.yaml
+```
+
+### Installing in AI Tools
+
+Add River to any MCP-compatible host's configuration file.
+
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%/Claude/claude_desktop_config.json` on Windows):
+
+```json
+{
+  "mcpServers": {
+    "river": {
+      "command": "river",
+      "args": ["--server", "--config", "/path/to/river.yaml"]
+    }
+  }
+}
+```
+
+**Cursor** (`.cursor/mcp.json` in project root):
+
+```json
+{
+  "mcpServers": {
+    "river": {
+      "command": "river",
+      "args": ["--server", "--config", "/path/to/river.yaml"]
+    }
+  }
+}
+```
+
+**opencode** (`~/.config/opencode/opencode.jsonc`):
+
+```json
+{
+  "mcpServers": {
+    "river": {
+      "type": "local",
+      "command": [
+        "river",
+        "--server",
+        "--config",
+        "/path/to/river.yaml"
+      ],
+      "enabled": true
+    }
+  }
+}
+```
+
+**VS Code** (via any MCP extension, add to `settings.json`):
+
+```json
+{
+  "mcp.servers": {
+    "river": {
+      "command": "river",
+      "args": ["--server", "--config", "/path/to/river.yaml"]
+    }
+  }
+}
+```
+
+If `river` is not on your `$PATH`, use the absolute path (e.g. `./target/release/river`). Build first with `cargo build --release`.
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `riverql_query` | Execute any RiverQL query (SELECT, INSERT, UPDATE, DELETE, DDL) |
+| `riverql_describe` | Describe a table's schema (columns, types, nullability) |
+| `riverql_list_tables` | List all tables/collections on a connection |
+| `riverql_explain` | Get the native SQL/MQL equivalent of a RiverQL query |
+| `riverql_list_connections` | List all configured database connections |
+| `riverql_help` | Return RiverQL syntax reference by topic |
+
+### Available Resources
+
+| URI | Content |
+|-----|---------|
+| `river://docs` | Full RiverQL language reference |
+| `river://docs/quickref` | Quick reference: keywords, operators, functions |
+| `river://docs/keywords` | Keyword-to-purpose mapping table |
+
+---
+
 ## Query Basics
 
 ### SELECT — `find`
@@ -283,6 +377,106 @@ find [abs(amount), round(price, 2), ceil(score), floor(score)] from products
 find [power(population, 2) as pop_sq] from cities
 find [sqrt(variance) as stddev] from stats
 ```
+
+### AI Functions
+
+Call AI/LLM models inline within queries using `ai_query`. This evaluates per-row after the base database query, calling the configured AI gateway for each result.
+
+**Syntax:**
+
+```sql
+ai_query(config_name, prompt)
+ai_query(config_name, model, prompt)
+```
+
+- `config_name` — AI connection name from `river.yaml`
+- `model` (optional) — Override the default model, e.g. `"gpt-4o-mini"`
+- `prompt` — Expression evaluated per row (can use `concat`, column refs, etc.)
+
+**Examples:**
+
+```sql
+find [review_text, ai_query("openai", concat("Summarize: ", review_text)) as summary] from reviews
+
+find [text, ai_query("openai", "gpt-4o-mini", concat("Classify: ", text)) as category] from items
+```
+
+**Supported Providers:**
+
+| Provider | Description |
+|----------|-------------|
+| `openai` (default) | OpenAI-compatible protocol — covers OpenAI, Deepseek, Kimi (Moonshot), Ollama, vLLM, Groq, Together, Mistral, Perplexity, xAI, and any service with a `/chat/completions` endpoint |
+| `anthropic` | Anthropic Claude — native Messages API |
+| `gemini` | Google Gemini — native generateContent API (AI Studio and Vertex AI) |
+
+**Configuration:**
+
+AI connections are defined in `river.yaml` alongside database connections:
+
+```yaml
+# OpenAI (and any OpenAI-compatible: Deepseek, Kimi, Ollama, etc.)
+- name: openai
+  kind: ai
+  provider: openai          # default
+  uri: "https://api.openai.com/v1"
+  api_key: "${OPENAI_API_KEY}"
+  model: "gpt-4o"
+
+# Anthropic Claude
+- name: claude
+  kind: ai
+  provider: anthropic
+  uri: "https://api.anthropic.com"
+  api_key: "${ANTHROPIC_API_KEY}"
+  model: "claude-sonnet-4-20250514"
+
+# Google Gemini (AI Studio)
+- name: gemini
+  kind: ai
+  provider: gemini
+  uri: "https://generativelanguage.googleapis.com/v1beta"
+  api_key: "${GEMINI_API_KEY}"
+  model: "gemini-2.0-flash"
+
+# Deepseek (OpenAI-compatible)
+- name: deepseek
+  kind: ai
+  uri: "https://api.deepseek.com/v1"
+  api_key: "${DEEPSEEK_API_KEY}"
+  model: "deepseek-chat"
+
+# Ollama (local, OpenAI-compatible)
+- name: ollama
+  kind: ai
+  uri: "http://localhost:11434/v1"
+  api_key: "ollama"
+  model: "llama3"
+```
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `name` | yes | — | Connection name used in `ai_query("name", ...)` |
+| `kind` | yes | — | Must be `ai` |
+| `provider` | no | `openai` | Provider: `openai`, `anthropic`, or `gemini` |
+| `uri` | yes | — | API base URL |
+| `api_key` | yes | — | API key for authentication |
+| `model` | yes | — | Default model name |
+| `headers` | no | `{}` | Additional HTTP headers |
+| `concurrency` | no | `10` | Max parallel AI calls |
+| `timeout_secs` | no | `60` | HTTP request timeout |
+| `max_tokens` | no | `1024` | Max response tokens |
+| `temperature` | no | `0.0` | Model temperature |
+
+**Error Handling:**
+
+Failed AI calls don't abort the query. The cell gets an error marker string:
+- `[AI Error: connection refused]` — gateway unreachable
+- `[AI Error: timeout]` — request timed out
+- `[AI Error: HTTP 401]` — authentication failed
+- `[AI Error: empty response]` — no choices in response
+- `[AI Error: invalid response format]` — unparseable JSON
+
+If the prompt evaluates to NULL, the AI call is skipped and the cell is NULL.
 
 ### Named Parameters
 
@@ -1047,6 +1241,12 @@ NOTE: Avoid using `-` in connection names
 - name: sqlite
   kind: sqlite
   uri: "sqlite:river.db?mode=rwc"
+
+- name: openai
+  kind: ai
+  base_url: "https://api.openai.com/v1"
+  api_key: "${OPENAI_API_KEY}"
+  model: "gpt-4o"
 ```
 
 ### Meta Commands with Connections

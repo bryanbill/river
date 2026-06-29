@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+
 use super::planner::{plan_statement, translate_insert_mongo, PlanNode};
+use crate::connection::AiConfig;
 use super::translator::{
     MSSQLDialect, MySQLDialect, PostgresDialect, SQLiteDialect, SqlDialect,
     translate_alter_table, translate_data_type, translate_drop_table, translate_expr,
@@ -1016,7 +1019,8 @@ fn plan_create_table_mongo_generates_json() {
     };
     let stmt = Statement::CreateTable(ct);
     let source_db = vec![("mongo".to_string(), DatabaseKind::MongoDB)];
-    let plan = plan_statement(&stmt, &source_db);
+    let ai_configs = HashMap::<String, AiConfig>::new();
+    let plan = plan_statement(&stmt, &source_db, &ai_configs);
     match &plan.root {
         PlanNode::CreateTable { sql, .. } => {
             assert!(
@@ -1058,7 +1062,8 @@ fn plan_create_table_postgres_generates_sql() {
     };
     let stmt = Statement::CreateTable(ct);
     let source_db = vec![("pg".to_string(), DatabaseKind::Postgres)];
-    let plan = plan_statement(&stmt, &source_db);
+    let ai_configs = HashMap::<String, AiConfig>::new();
+    let plan = plan_statement(&stmt, &source_db, &ai_configs);
     match &plan.root {
         PlanNode::CreateTable { sql, .. } => {
             assert!(
@@ -1107,7 +1112,8 @@ fn plan_insert_mongo_from_statement() {
     };
     let stmt = Statement::Insert(insert);
     let source_db = vec![("mongo".to_string(), DatabaseKind::MongoDB)];
-    let plan = plan_statement(&stmt, &source_db);
+    let ai_configs = HashMap::<String, AiConfig>::new();
+    let plan = plan_statement(&stmt, &source_db, &ai_configs);
     match &plan.root {
         PlanNode::Dml { sql, database } => {
             assert_eq!(database.1, DatabaseKind::MongoDB);
@@ -1254,7 +1260,8 @@ fn plan_alter_table() {
     };
     let stmt = Statement::AlterTable(at);
     let source_db = vec![("pg".to_string(), DatabaseKind::Postgres)];
-    let plan = plan_statement(&stmt, &source_db);
+    let ai_configs = HashMap::<String, AiConfig>::new();
+    let plan = plan_statement(&stmt, &source_db, &ai_configs);
     match &plan.root {
         PlanNode::AlterTable { database, sql } => {
             assert_eq!(database.0, "pg");
@@ -1281,7 +1288,8 @@ fn plan_alter_table_mongodb_empty() {
     };
     let stmt = Statement::AlterTable(at);
     let source_db = vec![("mongo".to_string(), DatabaseKind::MongoDB)];
-    let plan = plan_statement(&stmt, &source_db);
+    let ai_configs = HashMap::<String, AiConfig>::new();
+    let plan = plan_statement(&stmt, &source_db, &ai_configs);
     match &plan.root {
         PlanNode::AlterTable { database, sql } => {
             assert_eq!(database.1, DatabaseKind::MongoDB);

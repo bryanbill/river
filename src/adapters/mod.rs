@@ -118,6 +118,9 @@ pub async fn create_adapter(
         DatabaseKind::MSSQL => Ok(Box::new(mssql::MssqlAdapter::connect(config).await?)),
         DatabaseKind::SQLite => Ok(Box::new(sqlite::SQLiteAdapter::connect(config).await?)),
         DatabaseKind::MongoDB => Ok(Box::new(mongodb::MongoAdapter::connect(config).await?)),
+        DatabaseKind::AI => Err(RiverError::Unsupported(
+            "AI connections are not database adapters".into(),
+        )),
     }
 }
 

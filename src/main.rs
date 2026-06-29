@@ -1,4 +1,5 @@
 mod adapters;
+mod ai;
 mod connection;
 mod engine;
 mod error;
@@ -25,10 +26,11 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::adapters::DatabaseAdapter;
+use crate::ai::AiClient;
 use crate::tui::app;
 
 #[derive(Parser, Debug)]
-    #[command(name = "river", version = "0.9.0", about = "Unified Database Access")]
+    #[command(name = "river", version = "0.10.0", about = "Unified Database Access")]
 struct Cli {
     #[arg(short, long, default_value = "river.yaml")]
     config: String,
@@ -53,10 +55,26 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         config = %cli.config,
-        "River v0.9.0 — starting..."
+        "River v0.10.0 — starting..."
     );
 
     let connections = connection::config::load_config(&cli.config)?;
+    let ai_configs_vec = connection::config::load_ai_configs(&cli.config)?;
+
+    let ai_configs: HashMap<String, connection::config::AiConfig> = ai_configs_vec
+        .into_iter()
+        .map(|c| (c.name.clone(), c))
+        .collect();
+
+    if !ai_configs.is_empty() {
+        info!(
+            "loaded {} AI config(s): {:?}",
+            ai_configs.len(),
+            ai_configs.keys().collect::<Vec<_>>()
+        );
+    }
+
+    let ai_client = AiClient::new();
 
     let mut adapters: HashMap<String, Box<dyn DatabaseAdapter>> = HashMap::new();
     let mut conn_errors: Vec<String> = Vec::new();
@@ -81,10 +99,10 @@ async fn main() -> anyhow::Result<()> {
         .collect();
 
     if cli.server {
-        return crate::mcp::run_mcp_server(adapters, source_db).await;
+        return crate::mcp::run_mcp_server(adapters, source_db, ai_configs, ai_client).await;
     }
 
-    let mut app = app::App::new(adapters, source_db, conn_errors);
+    let mut app = app::App::new(adapters, source_db, ai_configs, ai_client, conn_errors);
 
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;

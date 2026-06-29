@@ -5,7 +5,8 @@ use rmcp::{ErrorData as McpError, object};
 use serde_json::Value;
 
 use crate::adapters::DatabaseAdapter;
-use crate::connection::DatabaseKind;
+use crate::ai::AiClient;
+use crate::connection::{AiConfig, DatabaseKind};
 use crate::engine::executor::execute_statement;
 use crate::lang;
 
@@ -106,14 +107,16 @@ pub fn tool_definitions() -> Vec<Tool> {
 pub async fn dispatch(
     adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
     source_db: &[(String, DatabaseKind)],
+    ai_configs: &HashMap<String, AiConfig>,
+    ai_client: &AiClient,
     name: &str,
     arguments: Option<serde_json::Map<String, Value>>,
 ) -> Result<rmcp::model::CallToolResult, McpError> {
     let args = arguments.unwrap_or_default();
 
     match name {
-        "riverql_query" => handle_query(adapters, source_db, &args).await,
-        "riverql_describe" => handle_describe(adapters, source_db, &args).await,
+        "riverql_query" => handle_query(adapters, source_db, ai_configs, ai_client, &args).await,
+        "riverql_describe" => handle_describe(adapters, source_db, ai_configs, ai_client, &args).await,
         "riverql_list_tables" => handle_list_tables(adapters, source_db, &args).await,
         "riverql_explain" => handle_explain(&args),
         "riverql_list_connections" => handle_list_connections(source_db, adapters),
@@ -127,13 +130,15 @@ pub async fn dispatch(
 async fn run_query(
     adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
     source_db: &[(String, DatabaseKind)],
+    ai_configs: &HashMap<String, AiConfig>,
+    ai_client: &AiClient,
     query: &str,
 ) -> Result<rmcp::model::CallToolResult, McpError> {
     let stmt = lang::parse(query).map_err(|e| {
         McpError::internal_error(format!("parse error: {}", e), None)
     })?;
 
-    let result = execute_statement(&stmt, source_db, adapters)
+    let result = execute_statement(&stmt, source_db, adapters, ai_configs, ai_client)
         .await
         .map_err(|e| {
             McpError::internal_error(format!("execution error: {}", e), None)
@@ -174,6 +179,8 @@ async fn run_query(
 async fn handle_query(
     adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
     source_db: &[(String, DatabaseKind)],
+    ai_configs: &HashMap<String, AiConfig>,
+    ai_client: &AiClient,
     args: &serde_json::Map<String, Value>,
 ) -> Result<rmcp::model::CallToolResult, McpError> {
     let query = args
@@ -181,12 +188,14 @@ async fn handle_query(
         .and_then(|v| v.as_str())
         .ok_or_else(|| McpError::invalid_params("missing required parameter 'query'", None))?;
 
-    run_query(adapters, source_db, query).await
+    run_query(adapters, source_db, ai_configs, ai_client, query).await
 }
 
 async fn handle_describe(
     adapters: &HashMap<String, Box<dyn DatabaseAdapter>>,
     source_db: &[(String, DatabaseKind)],
+    ai_configs: &HashMap<String, AiConfig>,
+    ai_client: &AiClient,
     args: &serde_json::Map<String, Value>,
 ) -> Result<rmcp::model::CallToolResult, McpError> {
     let table_input = args
@@ -201,7 +210,7 @@ async fn handle_describe(
         None => format!("describe {}", table_input),
     };
 
-    run_query(adapters, source_db, &query).await
+    run_query(adapters, source_db, ai_configs, ai_client, &query).await
 }
 
 async fn handle_list_tables(

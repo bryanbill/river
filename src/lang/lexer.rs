@@ -90,6 +90,9 @@ pub enum Token {
     Restrict,
     Database,
 
+    // AI function
+    AiQuery,
+
     // Aggregate function names (treated as keywords)
     Count,
     Sum,
@@ -277,6 +280,7 @@ impl fmt::Display for Token {
             Token::Cascade => write!(f, "cascade"),
             Token::Restrict => write!(f, "restrict"),
             Token::Database => write!(f, "database"),
+            Token::AiQuery => write!(f, "ai_query"),
             Token::Count => write!(f, "count"),
             Token::Sum => write!(f, "sum"),
             Token::Avg => write!(f, "avg"),
@@ -587,6 +591,7 @@ impl Lexer {
             "cascade" => Spanned::new(Token::Cascade, start..end),
             "restrict" => Spanned::new(Token::Restrict, start..end),
             "database" => Spanned::new(Token::Database, start..end),
+            "ai_query" => Spanned::new(Token::AiQuery, start..end),
             _ => Spanned::new(Token::Ident(ident), start..end),
         }
     }

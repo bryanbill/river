@@ -6,7 +6,8 @@ use ratatui::DefaultTerminal;
 use ratatui::layout::Rect;
 
 use crate::adapters::DatabaseAdapter;
-use crate::connection::DatabaseKind;
+use crate::ai::AiClient;
+use crate::connection::{AiConfig, DatabaseKind};
 use crate::engine::planner;
 use crate::engine::executor;
 use crate::lang::{self, ast::Statement};
@@ -39,6 +40,8 @@ pub(crate) enum DragTarget {
 pub struct App {
     pub adapters: HashMap<String, Box<dyn DatabaseAdapter>>,
     pub source_db: Vec<(String, DatabaseKind)>,
+    pub ai_configs: HashMap<String, AiConfig>,
+    pub ai_client: AiClient,
     pub input: InputState,
     pub output: OutputBuffer,
     pub status: Status,
@@ -62,6 +65,8 @@ impl App {
     pub fn new(
         adapters: HashMap<String, Box<dyn DatabaseAdapter>>,
         source_db: Vec<(String, DatabaseKind)>,
+        ai_configs: HashMap<String, AiConfig>,
+        ai_client: AiClient,
         conn_errors: Vec<String>,
     ) -> Self {
         let mut input = InputState::new();
@@ -73,7 +78,7 @@ impl App {
         let mut output = OutputBuffer::new(10_000);
 
         output.push(OutputLine::Info(
-            "River v0.9.0 — Unified Database Access".into(),
+            "River v0.10.0 — Unified Database Access".into(),
         ));
 
         let connected: Vec<&str> = adapters.keys().map(|s| s.as_str()).collect();
@@ -99,6 +104,8 @@ impl App {
         Self {
             adapters,
             source_db,
+            ai_configs,
+            ai_client,
             input,
             output,
             status: Status::Idle,
@@ -481,10 +488,10 @@ async fn execute_query(app: &mut App, input: String) {
 }
 
 async fn execute_plan(app: &mut App, stmt: &Statement) {
-    let plan = planner::plan_statement(stmt, &app.source_db);
+    let plan = planner::plan_statement(stmt, &app.source_db, &app.ai_configs);
     let timing = Instant::now();
 
-    match executor::execute_plan(&plan, &app.adapters).await {
+    match executor::execute_plan(&plan, &app.adapters, &app.ai_client).await {
         Ok(result) => {
             let elapsed = timing.elapsed();
             let cross_db = planner::is_cross_db(&plan.root);
@@ -512,11 +519,11 @@ async fn execute_plan(app: &mut App, stmt: &Statement) {
 async fn execute_with(app: &mut App, w: &crate::lang::ast::With) {
     let stmt = Statement::With(w.clone());
     let timing = Instant::now();
-    match executor::execute_statement(&stmt, &app.source_db, &app.adapters).await {
+    match executor::execute_statement(&stmt, &app.source_db, &app.adapters, &app.ai_configs, &app.ai_client).await {
         Ok(result) => {
             let elapsed = timing.elapsed();
             let body_stmt = w.body.as_ref();
-            let plan = planner::plan_statement(body_stmt, &app.source_db);
+            let plan = planner::plan_statement(body_stmt, &app.source_db, &app.ai_configs);
             let cross_db = planner::is_cross_db(&plan.root);
             push_result(
                 app,
@@ -649,9 +656,9 @@ async fn execute_show_tables(app: &mut App, conn: &Option<String>) {
 }
 
 async fn execute_dml(app: &mut App, stmt: &Statement) {
-    let plan = planner::plan_statement(stmt, &app.source_db);
+    let plan = planner::plan_statement(stmt, &app.source_db, &app.ai_configs);
 
-    match executor::execute_plan(&plan, &app.adapters).await {
+    match executor::execute_plan(&plan, &app.adapters, &app.ai_client).await {
         Ok(result) => {
             app.output.push(OutputLine::Info(format!(
                 "OK — {} row(s) affected in {:?}",
@@ -669,7 +676,7 @@ async fn execute_dml(app: &mut App, stmt: &Statement) {
 }
 
 async fn execute_explain(app: &mut App, inner: &Statement) {
-    let plan = planner::plan_statement(inner, &app.source_db);
+    let plan = planner::plan_statement(inner, &app.source_db, &app.ai_configs);
     let plan_lines = planner::format_plan(&plan.root);
 
     app.output

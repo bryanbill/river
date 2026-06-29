@@ -18,3 +18,10 @@
 - name: sqlite
   kind: sqlite
   uri: "sqlite:river.db?mode=rwc"
+
+- name: claude
+  kind: ai
+  provider: anthropic
+  uri: "https://api.anthropic.com"
+  api_key: "${ANTHROPIC_API_KEY}"
+  model: "claude-opus-4-6"
